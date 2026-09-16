@@ -4,13 +4,21 @@ A binary container for agent skills: `SKILL.md` compiled into a signed, mmap-abl
 verified graph with executable segments.
 
 - `docs/GRAPH.md` — the data model, derived by measuring 8,776 real `SKILL.md` files
-- `docs/SPEC.md` — the byte layout, verification order, and conformance corpus
+- `docs/SPEC.md` — the byte layout, verification order, conformance corpus, and the defects
+  that writing the implementation forced back into the spec (§10)
+- `docs/RESULTS.md` — what compiling and fuzzing the corpus actually measured
 - `crates/skill-format` — reference reader, validator and canonical writer (`forbid(unsafe)`)
+- `crates/skillc` — `SKILL.md` → `.skill` compiler, and the renderer that proves the round-trip
 
 ```sh
-./scripts/gate.sh                      # fmt, clippy -D warnings, tests, spec/writer agreement
-cargo run --example dump_minimal       # the spec's worked example, regenerated
+./scripts/gate.sh                    # fmt, clippy -D warnings, tests, 5s fuzz, spec agreement
+./scripts/fuzz.sh 600 4              # long fuzz, capped at one core and 2G under systemd
+cargo run --example dump_minimal     # the spec's worked example, regenerated
+cargo run --release --bin skillc -- corpus <list-of-SKILL.md-paths>
 ```
+
+All 8,776 `SKILL.md` files on this workstation compile, verify, and render back — 99.85%
+byte-exact, 100% modulo trailing whitespace. 46M fuzz inputs, zero panics, 31 MB peak RSS.
 
 ## Why
 
@@ -22,10 +30,10 @@ vocabulary. Compiling that graph buys three things Markdown cannot:
 - **Progressive disclosure becomes layout.** Tier is monotone from parent to child, so the
   loaded set is always a prefix-closed subtree, and the routing plane is physically separate
   from the bodies. A loader cannot read a body to decide whether it wants one.
-- **Executable content gets an identity.** 184 of 8,776 skills ship a `scripts/` directory, but
-  a 600-skill sample holds 687 bash and 357 python fenced blocks — executable in intent, inert
-  in practice. A `Segment` node gives each one an ABI, a capability set, resource limits, a
-  BLAKE3 root and its own signature.
+- **Executable content gets an identity.** 184 of 8,776 skills ship a `scripts/` directory, yet
+  compiling the corpus lifts **19,534** executable fragments out of fenced code blocks —
+  executable in intent, inert in practice. A `Segment` node gives each one an ABI, a capability
+  set, resource limits, a BLAKE3 root and its own signature, and authorizes it for nothing.
 - **Verification precedes parsing.** Signatures cover a fixed 64-byte range that commits to the
   manifest root, which commits to every section and subtree hash. The parser only ever runs on
   bytes already proven to be the publisher's.

@@ -140,11 +140,12 @@ pub struct Edge {
     pub label: u16,
 }
 
+/// Carries no offset or length: a segment's bytes are the payload of the `Segment`-kind node it
+/// is parallel-indexed to (`SPEC.md` §10.4). Storing the location twice would be a second
+/// encoding of one fact, which is what §10.1 was already about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segment {
     pub root: [u8; 32],
-    pub off: u32,
-    pub len: u32,
     pub orig_len: u32,
     pub abi: Abi,
     pub codec: u8,

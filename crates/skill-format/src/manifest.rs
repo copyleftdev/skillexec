@@ -244,6 +244,23 @@ impl<'a> Manifest<'a> {
         })
     }
 
+    /// Returns `(kind, flags, arg_idx)` for one capability record.
+    ///
+    /// # Errors
+    /// Rejects an index past the end of the capability table.
+    pub fn cap(&self, idx: u32) -> Result<(u16, u16, u32)> {
+        let s = self.caps.ok_or(Error::SegmentIndexOutOfRange(idx))?;
+        if idx >= s.count {
+            return Err(Error::SegmentIndexOutOfRange(idx));
+        }
+        let o = s.off as usize + CAP_LEN * idx as usize;
+        Ok((
+            u16_at(self.raw, o)?,
+            u16_at(self.raw, o + 2)?,
+            u32_at(self.raw, o + 4)?,
+        ))
+    }
+
     /// # Errors
     /// Rejects an out-of-range index, an unknown ABI, or a non-zero reserved field.
     pub fn segment(&self, idx: u32) -> Result<Segment> {
@@ -252,26 +269,24 @@ impl<'a> Manifest<'a> {
             return Err(Error::SegmentIndexOutOfRange(idx));
         }
         let o = s.off as usize + SEGMENT_LEN * idx as usize;
-        all_zero(self.raw, o + 0x4C, 20, "segment reserved 0x4C")?;
+        all_zero(self.raw, o + 0x44, 28, "segment reserved 0x44")?;
         Ok(Segment {
             root: hash_at(self.raw, o)?,
-            off: u32_at(self.raw, o + 0x20)?,
-            len: u32_at(self.raw, o + 0x24)?,
-            orig_len: u32_at(self.raw, o + 0x28)?,
-            abi: Abi::from_u16(u16_at(self.raw, o + 0x2C)?)?,
-            codec: u8_at(self.raw, o + 0x2E)?,
-            trust_class: match u8_at(self.raw, o + 0x2F)? {
+            orig_len: u32_at(self.raw, o + 0x20)?,
+            abi: Abi::from_u16(u16_at(self.raw, o + 0x24)?)?,
+            codec: u8_at(self.raw, o + 0x26)?,
+            trust_class: match u8_at(self.raw, o + 0x27)? {
                 0 => TrustClass::Portable,
                 _ => TrustClass::HostTrusted,
             },
-            cap_off: u32_at(self.raw, o + 0x30)?,
-            cap_cnt: u16_at(self.raw, o + 0x34)?,
-            flags: u16_at(self.raw, o + 0x36)?,
-            mem_kib: u32_at(self.raw, o + 0x38)?,
-            cpu_ms: u32_at(self.raw, o + 0x3C)?,
-            wall_ms: u32_at(self.raw, o + 0x40)?,
-            dict_idx: u32_at(self.raw, o + 0x44)?,
-            signer_idx: u32_at(self.raw, o + 0x48)?,
+            cap_off: u32_at(self.raw, o + 0x28)?,
+            cap_cnt: u16_at(self.raw, o + 0x2C)?,
+            flags: u16_at(self.raw, o + 0x2E)?,
+            mem_kib: u32_at(self.raw, o + 0x30)?,
+            cpu_ms: u32_at(self.raw, o + 0x34)?,
+            wall_ms: u32_at(self.raw, o + 0x38)?,
+            dict_idx: u32_at(self.raw, o + 0x3C)?,
+            signer_idx: u32_at(self.raw, o + 0x40)?,
         })
     }
 

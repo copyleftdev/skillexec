@@ -155,15 +155,18 @@ of a traversal — the same trick as `parent < self`.
 | Off | Size | Field |
 |---|---|---|
 | 0x00 | 32 | `root` — BLAKE3 root of the decompressed segment |
-| 0x20 | 4 | `off` · 0x24 4 `len` (stored) · 0x28 4 `orig_len` |
-| 0x2C | 2 | `abi` — 1 `wasm32-wasip2`, 2 `sh`, 3 `python3`, 4 `node`, 5 `native` |
-| 0x2E | 1 | `codec` — 0 raw, 1 zstd, 2 zstd+dict |
-| 0x2F | 1 | `trust_class` — 0 `Portable`, 1 `HostTrusted` |
-| 0x30 | 4 | `cap_off` · 0x34 2 `cap_cnt` · 0x36 2 `flags` |
-| 0x38 | 4 | `mem_kib` · 0x3C 4 `cpu_ms` · 0x40 4 `wall_ms` |
-| 0x44 | 4 | `dict_idx` — shared zstd dictionary, `0xFFFFFFFF` = none |
-| 0x48 | 4 | `signer_idx` — into the signature block; `0xFFFFFFFF` = file signature only |
-| 0x4C | 20 | `reserved` (zero) |
+| 0x20 | 4 | `orig_len` — uncompressed length |
+| 0x24 | 2 | `abi` — 1 `wasm32-wasip2`, 2 `sh`, 3 `python3`, 4 `node`, 5 `native` |
+| 0x26 | 1 | `codec` — 0 raw, 1 zstd, 2 zstd+dict |
+| 0x27 | 1 | `trust_class` — 0 `Portable`, 1 `HostTrusted` |
+| 0x28 | 4 | `cap_off` · 0x2C 2 `cap_cnt` · 0x2E 2 `flags` |
+| 0x30 | 4 | `mem_kib` · 0x34 4 `cpu_ms` · 0x38 4 `wall_ms` |
+| 0x3C | 4 | `dict_idx` — shared zstd dictionary, `0xFFFFFFFF` = none |
+| 0x40 | 4 | `signer_idx` — into the signature block; `0xFFFFFFFF` = file signature only |
+| 0x44 | 28 | `reserved` (zero) |
+
+The record carries **no offset or length**: a segment's bytes are the payload of the
+`Segment`-kind node it is parallel-indexed to (§10.4).
 
 Capability record (8 B): `kind u16`, `flags u16`, `arg_idx u32` → string heap.
 Kinds: `net:host`, `fs:read`, `fs:write`, `env`, `exec`, `clock`, `rand`.
@@ -307,3 +310,29 @@ Every byte of a payload region not claimed by a node's payload range MUST be zer
 validator enforces it (`Error::UncommittedNonZero`). The general rule, stated in §0 but not
 originally carried through: *if a byte is in the file and no commitment covers it, the format is
 malleable there.*
+
+
+### 10.4 A SEGMENTS section with no way to reach it
+
+§4.6 defined a segment record and §4.4 defined a node record, and nothing connected them. The
+node has no spare field — all 32 bytes are spoken for — so the obvious fixes were to overload an
+existing field or to grow the record.
+
+Neither was necessary. **Segment records are parallel-indexed to `Segment`-kind nodes in
+pre-order**: the k-th `Segment` node uses the k-th record. Costs nothing, is canonical because
+both orders are already canonical, and is validated by requiring the counts to agree
+(`Error::SegmentCountMismatch`).
+
+The same reasoning removed `off` and `len` from the record. A segment's bytes are its node's
+payload; storing that location twice would have reintroduced §10.1 verbatim.
+
+### 10.5 Dedup by substring manufactures overlapping ranges
+
+The first writer deduplicated payloads with a substring search, which looks like a strictly
+better exact-match dedup. It is not. Short payloads occur inside longer ones constantly — a lone
+`"\n"`, a bare fence marker — so 30% of a 300-file corpus slice produced *partially* overlapping
+payload ranges and were rejected by the validator's own overlap rule.
+
+Dedup is now exact-blob only, keyed by `(region, bytes)`. Identical ranges stay legal, which is
+what content addressing needs; partial overlap remains a rejection. The substring version was
+also `O(region × payload)` per node, which the corpus run made visible.

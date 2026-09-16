@@ -1,15 +1,54 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::error::{Error, Result};
-use crate::graph::{EdgeKind, Kind, NONE32, Tier, node_flags};
+use crate::graph::{Abi, EdgeKind, Kind, NONE32, Tier, TrustClass, node_flags};
 use crate::header::{HEADER_LEN, MAGIC, VERSION_MAJOR, VERSION_MINOR};
 use crate::manifest::{
-    DIR_ENTRY_LEN, MANIFEST_HDR_LEN, NODE_LEN, SECT_EDGES, SECT_HASHES, SECT_NODES, SECT_STRINGS,
+    DIR_ENTRY_LEN, MANIFEST_HDR_LEN, NODE_LEN, SECT_CAPS, SECT_EDGES, SECT_HASHES, SECT_NODES,
+    SECT_SEGMENTS, SECT_STRINGS,
 };
 use crate::subtree_hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeId(usize);
+
+/// A capability a segment declares and the loader enforces. Kinds mirror `SPEC.md` §4.6.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cap {
+    pub kind: u16,
+    pub flags: u16,
+    pub arg: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SegmentSpec {
+    pub abi: Abi,
+    pub trust_class: TrustClass,
+    pub caps: Vec<Cap>,
+    pub mem_kib: u32,
+    pub cpu_ms: u32,
+    pub wall_ms: u32,
+}
+
+impl SegmentSpec {
+    /// A segment that is identified but authorized for nothing. This is the right default for
+    /// code lifted out of prose: it has an ABI and a hash, and no policy will run it.
+    #[must_use]
+    pub fn inert(abi: Abi) -> Self {
+        Self {
+            trust_class: if abi.is_portable() {
+                TrustClass::Portable
+            } else {
+                TrustClass::HostTrusted
+            },
+            abi,
+            caps: Vec::new(),
+            mem_kib: 0,
+            cpu_ms: 0,
+            wall_ms: 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct BuildNode {
@@ -22,6 +61,7 @@ struct BuildNode {
     payload: Vec<u8>,
     parent: Option<usize>,
     edges: Vec<(EdgeKind, usize, u8, u16)>,
+    segment: Option<SegmentSpec>,
 }
 
 /// Emits canonical bytes by construction: callers describe a tree, the builder chooses the
@@ -105,8 +145,44 @@ impl Builder {
             payload: payload.into(),
             parent,
             edges: Vec::new(),
+            segment: None,
         });
         NodeId(self.nodes.len() - 1)
+    }
+
+    /// Adds a `Segment` node. The bytes are the node's payload; the spec supplies everything
+    /// that is not derivable from them.
+    pub fn segment(
+        &mut self,
+        parent: NodeId,
+        name: Option<&str>,
+        bytes: impl Into<Vec<u8>>,
+        spec: SegmentSpec,
+        depth: u8,
+    ) -> NodeId {
+        let id = self.push(
+            Kind::Segment,
+            Tier::OnDemand,
+            0,
+            bytes,
+            Some(parent.0),
+            name,
+            depth,
+        );
+        self.nodes[id.0].segment = Some(spec);
+        id
+    }
+
+    /// Role is descriptive and never drives dispatch, so a compiler may refine it after the
+    /// node exists without changing how anything loads.
+    pub fn set_role(&mut self, id: NodeId, role: u16) {
+        self.nodes[id.0].role = role;
+    }
+
+    /// Replaces a node's payload after creation, so a compiler can open a section node before
+    /// it has seen the prose that belongs to it.
+    pub fn set_payload(&mut self, id: NodeId, payload: impl Into<Vec<u8>>) {
+        self.nodes[id.0].payload = payload.into();
     }
 
     pub fn edge(&mut self, src: NodeId, kind: EdgeKind, dst: NodeId, ordinal: u8, label: u16) {
@@ -153,6 +229,9 @@ impl Builder {
             if let Some(s) = &n.name {
                 strs.insert(s);
             }
+            for c in n.segment.iter().flat_map(|sp| &sp.caps) {
+                strs.insert(&c.arg);
+            }
         }
         let strs: Vec<&str> = strs.into_iter().collect();
         let sidx = |s: &str| -> u32 {
@@ -161,6 +240,10 @@ impl Builder {
 
         let mut hot: Vec<u8> = Vec::new();
         let mut cold: Vec<u8> = Vec::new();
+        // Exact-blob dedup only. Substring dedup looks like a free win and is not: short
+        // payloads occur inside longer ones constantly, which manufactures partially
+        // overlapping ranges and makes the file ambiguous about who owns which bytes.
+        let mut seen: HashMap<(bool, Vec<u8>), u32> = HashMap::new();
         let mut placed: Vec<(u32, u32, bool)> = vec![(0, 0, false); self.nodes.len()];
         for &old in &order {
             let n = &self.nodes[old];
@@ -168,12 +251,14 @@ impl Builder {
             let region = if is_cold { &mut cold } else { &mut hot };
             let off = if n.payload.is_empty() {
                 0
-            } else if let Some(p) = find_sub(region, &n.payload) {
-                u32::try_from(p).map_err(|_| Error::OffsetOverflow { what: "payload" })?
+            } else if let Some(&p) = seen.get(&(is_cold, n.payload.clone())) {
+                p
             } else {
-                let at = region.len();
+                let at = u32::try_from(region.len())
+                    .map_err(|_| Error::OffsetOverflow { what: "payload" })?;
                 region.extend_from_slice(&n.payload);
-                u32::try_from(at).map_err(|_| Error::OffsetOverflow { what: "payload" })?
+                seen.insert((is_cold, n.payload.clone()), at);
+                at
             };
             placed[old] = (
                 off,
@@ -256,6 +341,45 @@ impl Builder {
             heap.extend_from_slice(s.as_bytes());
         }
 
+        let mut caps_sec: Vec<u8> = Vec::new();
+        let mut cap_count = 0u32;
+        let mut segs_sec: Vec<u8> = Vec::new();
+        let mut seg_count = 0u32;
+        for &old in &order {
+            let n = &self.nodes[old];
+            let Some(spec) = &n.segment else { continue };
+            let cap_off = cap_count;
+            for c in &spec.caps {
+                caps_sec.extend_from_slice(&c.kind.to_le_bytes());
+                caps_sec.extend_from_slice(&c.flags.to_le_bytes());
+                caps_sec.extend_from_slice(&sidx(&c.arg).to_le_bytes());
+                cap_count += 1;
+            }
+            segs_sec.extend_from_slice(blake3::hash(&n.payload).as_bytes());
+            segs_sec.extend_from_slice(
+                &u32::try_from(n.payload.len())
+                    .map_err(|_| Error::OffsetOverflow { what: "segment" })?
+                    .to_le_bytes(),
+            );
+            segs_sec.extend_from_slice(&(spec.abi as u16).to_le_bytes());
+            segs_sec.push(0);
+            segs_sec.push(spec.trust_class as u8);
+            segs_sec.extend_from_slice(&cap_off.to_le_bytes());
+            segs_sec.extend_from_slice(
+                &u16::try_from(spec.caps.len())
+                    .map_err(|_| Error::OffsetOverflow { what: "caps" })?
+                    .to_le_bytes(),
+            );
+            segs_sec.extend_from_slice(&0u16.to_le_bytes());
+            segs_sec.extend_from_slice(&spec.mem_kib.to_le_bytes());
+            segs_sec.extend_from_slice(&spec.cpu_ms.to_le_bytes());
+            segs_sec.extend_from_slice(&spec.wall_ms.to_le_bytes());
+            segs_sec.extend_from_slice(&NONE32.to_le_bytes());
+            segs_sec.extend_from_slice(&NONE32.to_le_bytes());
+            segs_sec.extend_from_slice(&[0u8; 28]);
+            seg_count += 1;
+        }
+
         let mut sections: Vec<(u16, Vec<u8>, u32)> = vec![
             (SECT_STRINGS, heap, u32::try_from(strs.len()).unwrap_or(0)),
             (
@@ -276,6 +400,12 @@ impl Builder {
             hashes_sec,
             u32::try_from(hash_tbl.len()).unwrap_or(0),
         ));
+        if seg_count > 0 {
+            sections.push((SECT_SEGMENTS, segs_sec, seg_count));
+        }
+        if cap_count > 0 {
+            sections.push((SECT_CAPS, caps_sec, cap_count));
+        }
 
         let dir_len = DIR_ENTRY_LEN * sections.len();
         let mut body: Vec<u8> = Vec::new();
@@ -401,11 +531,4 @@ impl Builder {
         }
         out
     }
-}
-
-fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() {
-        return None;
-    }
-    hay.windows(needle.len()).position(|w| w == needle)
 }

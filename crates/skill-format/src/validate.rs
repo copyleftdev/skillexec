@@ -48,7 +48,7 @@ pub(crate) fn graph(m: &Manifest<'_>) -> Result<Vec<Node>> {
     check_strings_and_hashes(m, &nodes)?;
     check_edges(m, &nodes)?;
     check_payload_ranges(m, &nodes)?;
-    check_segments(m)?;
+    check_segments(m, &nodes)?;
     m.check_string_order()?;
     Ok(nodes)
 }
@@ -243,7 +243,17 @@ fn check_payload_ranges(m: &Manifest<'_>, nodes: &[Node]) -> Result<()> {
     Ok(())
 }
 
-fn check_segments(m: &Manifest<'_>) -> Result<()> {
+/// Segment records are parallel-indexed to `Segment`-kind nodes in pre-order, so the counts must
+/// agree exactly; there is no field linking one to the other and none is needed.
+fn check_segments(m: &Manifest<'_>, nodes: &[Node]) -> Result<()> {
+    let seg_nodes =
+        u32::try_from(nodes.iter().filter(|n| n.kind == Kind::Segment).count()).unwrap_or(NONE32);
+    if seg_nodes != m.segment_count() {
+        return Err(Error::SegmentCountMismatch {
+            nodes: seg_nodes,
+            records: m.segment_count(),
+        });
+    }
     for i in 0..m.segment_count() {
         let s = m.segment(i)?;
         if s.trust_class == TrustClass::Portable && !s.abi.is_portable() {

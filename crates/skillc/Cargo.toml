@@ -1,0 +1,13 @@
+[package]
+name = "skillc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compiles SKILL.md into the .skill binary container, and renders it back"
+
+[dependencies]
+skill-format = { path = "../skill-format" }
+
+[lints]
+workspace = true

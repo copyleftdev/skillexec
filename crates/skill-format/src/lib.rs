@@ -19,7 +19,7 @@ pub use graph::{Abi, Edge, EdgeKind, Kind, Node, Segment, Tier, TrustClass};
 pub use header::Header;
 pub use manifest::Manifest;
 pub use sig::{SigEntry, TrustPolicy};
-pub use writer::{Builder, NodeId};
+pub use writer::{Builder, Cap, NodeId, SegmentSpec};
 
 use graph::{NONE32, node_flags};
 

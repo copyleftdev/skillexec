@@ -21,6 +21,8 @@ run "fmt"     cargo fmt --check
 run "clippy"  cargo clippy --all-targets -- -D warnings
 run "test"    cargo test --all
 run "example" cargo run -q --example dump_minimal
+# A short, single-threaded, time-capped campaign. The long one lives in scripts/fuzz.sh.
+run "fuzz"    cargo run -q --release --bin fuzz -- --iters 2000000 --seconds 5
 
 # The spec's worked example must be the reference writer's actual output.
 expected=$(cargo run -q --example dump_minimal 2>/dev/null | head -1 | cut -c1-58)

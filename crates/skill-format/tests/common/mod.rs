@@ -1,7 +1,7 @@
 // Shared by both test binaries; each uses a subset, so unused-here is expected.
 #![allow(dead_code)]
 
-use skill_format::{Builder, EdgeKind, Kind, Skill, Tier, TrustPolicy};
+use skill_format::{Abi, Builder, Cap, EdgeKind, Kind, SegmentSpec, Skill, Tier, TrustPolicy};
 
 pub const ROLE_INTENT: u16 = 1;
 pub const ROLE_STEP: u16 = 2;
@@ -93,13 +93,21 @@ pub fn rich() -> Vec<u8> {
         &b"long reference\n"[..],
         0,
     );
-    let seg = b.child(
+    let seg = b.segment(
         body,
-        Kind::Segment,
-        Tier::OnDemand,
-        0,
         Some("run.wasm"),
         &b"\0asm"[..],
+        SegmentSpec {
+            caps: vec![Cap {
+                kind: 1,
+                flags: 0,
+                arg: "example.com".into(),
+            }],
+            mem_kib: 4096,
+            cpu_ms: 500,
+            wall_ms: 1000,
+            ..SegmentSpec::inert(Abi::Wasm32Wasip2)
+        },
         0,
     );
     let trap = b.child(
@@ -137,10 +145,40 @@ pub fn reserialize(bytes: &[u8]) -> Vec<u8> {
         b = b.license(s.manifest.string(s.manifest.license_idx).unwrap());
     }
     let mut ids = Vec::new();
+    let mut seg_seen = 0u32;
     for (i, n) in s.nodes.iter().enumerate() {
         let payload = s.payload(u32::try_from(i).unwrap()).unwrap().to_vec();
         let id = if i == 0 {
             b.root(n.kind, n.tier, n.role, payload)
+        } else if n.kind == Kind::Segment {
+            let name =
+                (n.name_idx != u32::MAX).then(|| s.manifest.string(n.name_idx).unwrap().to_owned());
+            let rec = s.manifest.segment(seg_seen).unwrap();
+            let caps = (0..u32::from(rec.cap_cnt))
+                .map(|k| {
+                    let c = s.manifest.cap(rec.cap_off + k).unwrap();
+                    Cap {
+                        kind: c.0,
+                        flags: c.1,
+                        arg: s.manifest.string(c.2).unwrap().to_owned(),
+                    }
+                })
+                .collect();
+            seg_seen += 1;
+            b.segment(
+                ids[n.parent as usize],
+                name.as_deref(),
+                payload,
+                SegmentSpec {
+                    abi: rec.abi,
+                    trust_class: rec.trust_class,
+                    caps,
+                    mem_kib: rec.mem_kib,
+                    cpu_ms: rec.cpu_ms,
+                    wall_ms: rec.wall_ms,
+                },
+                n.depth,
+            )
         } else {
             let name =
                 (n.name_idx != u32::MAX).then(|| s.manifest.string(n.name_idx).unwrap().to_owned());

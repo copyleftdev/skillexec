@@ -89,6 +89,10 @@ pub enum Error {
     SegmentHashMismatch(u32),
     SegmentIndexOutOfRange(u32),
     PortableClaimOnNonWasm(u32),
+    SegmentCountMismatch {
+        nodes: u32,
+        records: u32,
+    },
     DeclaredLenMismatch {
         what: &'static str,
     },
