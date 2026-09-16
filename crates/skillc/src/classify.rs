@@ -253,11 +253,15 @@ static RULES: &[Rule] = &[
     ),
 ];
 
+/// Unicode-aware on purpose. `is_ascii_alphanumeric` silently turned "prüfprogramm" into
+/// "prfprogramm", which no rule could ever match and which made the census output lie about what
+/// was in the corpus. A held-out corpus turned out to be substantially non-English, so mangling
+/// is not a harmless simplification here.
 fn normalize(title: &str) -> String {
     title
         .to_lowercase()
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == ' ')
+        .filter(|c| c.is_alphanumeric() || *c == ' ')
         .collect::<String>()
         .trim()
         .to_string()

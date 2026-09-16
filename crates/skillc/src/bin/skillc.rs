@@ -120,7 +120,7 @@ fn role_census(list: &str) {
                 let key: String = text
                     .to_lowercase()
                     .chars()
-                    .filter(|c| c.is_ascii_alphanumeric() || *c == ' ')
+                    .filter(|c| c.is_alphanumeric() || *c == ' ')
                     .collect();
                 *unmatched.entry(key.trim().to_string()).or_insert(0) += 1;
             }
