@@ -84,3 +84,36 @@ fn a_skill_with_no_frontmatter_still_compiles() {
 fn empty_input_compiles() {
     exact("");
 }
+
+// The three frontmatter shapes a 128k-file held-out corpus produced, and nothing smaller did.
+
+#[test]
+fn an_empty_frontmatter_block_survives() {
+    exact("---\n---\nname: x\ndescription: d\n---\n\nBody.\n");
+}
+
+#[test]
+fn a_file_that_is_only_frontmatter_gains_no_extra_delimiter() {
+    exact("---\nname: only\ndescription: d\n---\n");
+}
+
+#[test]
+fn a_stray_rule_below_the_frontmatter_is_left_alone() {
+    exact("---\nname: x\ndescription: d\n---\n\nIntro.\n\n---\n\nMore.\n");
+}
+
+#[test]
+fn frontmatter_is_stored_verbatim_not_reconstructed() {
+    let src = "---\nname: v\ndescription: d\n---\n\nBody.\n";
+    let doc = md::parse(src);
+    assert!(
+        doc.fm_raw.starts_with("---\n") && doc.fm_raw.ends_with("---\n"),
+        "the block must include its own delimiters"
+    );
+    assert_eq!(doc.get("name"), Some("v"));
+}
+
+#[test]
+fn an_unterminated_frontmatter_block_is_not_frontmatter() {
+    exact("---\nname: x\nno closing delimiter\n");
+}

@@ -94,7 +94,10 @@ fn main() {
 fn role_census(list: &str) {
     let listing = std::fs::read_to_string(list).expect("read list");
     let mut by_role: Vec<(u16, usize)> = Vec::new();
-    let mut unmatched: Vec<(String, usize)> = Vec::new();
+    // A map, not a Vec. The Vec version scanned the distinct-heading list once per heading:
+    // invisible on a few thousand files, quadratic on a hundred thousand. The tool stalled on
+    // its own corpus before it produced a number.
+    let mut unmatched: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut headings = 0usize;
     let mut files = 0usize;
 
@@ -119,17 +122,14 @@ fn role_census(list: &str) {
                     .chars()
                     .filter(|c| c.is_ascii_alphanumeric() || *c == ' ')
                     .collect();
-                let key = key.trim().to_string();
-                match unmatched.iter_mut().find(|(k, _)| *k == key) {
-                    Some((_, n)) => *n += 1,
-                    None => unmatched.push((key, 1)),
-                }
+                *unmatched.entry(key.trim().to_string()).or_insert(0) += 1;
             }
         }
     }
 
     by_role.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    unmatched.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let mut unmatched: Vec<(String, usize)> = unmatched.into_iter().collect();
+    unmatched.sort_by_key(|(k, n)| (std::cmp::Reverse(*n), k.clone()));
     let classified = headings
         - by_role
             .iter()
@@ -150,6 +150,7 @@ fn role_census(list: &str) {
             *n as f64 * 100.0 / headings.max(1) as f64
         );
     }
+    println!("distinct unclassified  {}", unmatched.len());
     println!("\ntop unclassified headings:");
     for (k, n) in unmatched.iter().take(30) {
         println!("  {n:>6}  {k}");

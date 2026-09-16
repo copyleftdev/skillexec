@@ -20,9 +20,8 @@ fn emit(s: &Skill<'_>, idx: u32, out: &mut String) -> skill_format::Result<()> {
 
     if idx != 0 {
         if n.role == ROLE_FRONTMATTER {
-            out.push_str("---\n");
+            // The payload is the block as written, delimiters and all.
             out.push_str(payload);
-            out.push_str("---\n");
             return Ok(());
         }
         if n.role == ROLE_FENCE || n.role == ROLE_FENCE_UNCLOSED || n.kind == Kind::Segment {

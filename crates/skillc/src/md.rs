@@ -44,10 +44,16 @@ pub fn parse(src: &str) -> Document {
     if let Some(after) = src.strip_prefix("---\n")
         && let Some(end) = find_fm_end(after)
     {
-        doc.fm_raw = after[..end].to_string();
-        doc.frontmatter = parse_frontmatter(&doc.fm_raw);
-        rest = &after[end..];
-        rest = rest.strip_prefix("---\n").unwrap_or(rest);
+        // Stored verbatim, delimiters included. Reconstructing `---` lines on render meant
+        // guessing, and the corpus supplied all three ways to guess wrong: a file opening with
+        // an empty `---\n---\n` block, a file that is nothing but frontmatter, and one with a
+        // stray `---` further down. Store, do not derive.
+        let close = after[end..]
+            .strip_prefix("---\n")
+            .map_or(after.len(), |r| after.len() - r.len());
+        doc.fm_raw = src[..4 + close].to_string();
+        doc.frontmatter = parse_frontmatter(&after[..end]);
+        rest = &after[close..];
     }
 
     let mut text = String::new();
