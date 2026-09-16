@@ -99,6 +99,8 @@ pub enum Error {
     },
     RootHasNoCommitment,
     RoutingNotUtf8,
+    RoutingEmpty,
+    RoutingRootNotTopLevel(u32),
     RoutingTooLong,
     RoutingUncommitted,
     RoutingHashMismatch,

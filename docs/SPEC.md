@@ -32,7 +32,7 @@ Reserved fields **MUST** be written zero and readers **MUST** reject non-zero.
 | Off | Size | Field | Notes |
 |---|---|---|---|
 | 0x00 | 8 | `magic` | `8F 53 4B 4C 0D 0A 1A 0A` — high bit (8-bit-clean test), `SKL`, CRLF pair (text-mode mangling trap), `1A` (DOS EOF), `0A` (LF-stripping trap). PNG's trick, and it still works. |
-| 0x08 | 2 | `ver_major` | `1`. Reader rejects unknown major. |
+| 0x08 | 2 | `ver_major` | `2`. Reader rejects unknown major. |
 | 0x0A | 2 | `ver_minor` | Reader ignores unknown minor. |
 | 0x0C | 4 | `feature_flags` | **Must-understand bitmask.** Any set bit the reader does not implement ⇒ reject. |
 | 0x10 | 4 | `file_len` | MUST equal actual length. Truncation detector. |
@@ -67,17 +67,26 @@ Immediately after the signature block, at an offset **derived from the header al
 
 | Off | Size | Field |
 |---|---|---|
-| 0x00 | 2 | `name_len` |
-| 0x02 | 2 | `desc_len` |
-| 0x04 | `name_len` | name, UTF-8 |
-| … | `desc_len` | description, UTF-8 |
+| 0x00 | 2 | `count` — skills in this file |
+| 0x02 | 2 | `reserved` (zero) |
+| 0x04 | `count` × 8 | `root u32`, `name_len u16`, `desc_len u16` |
+| … | — | arena: name then description bytes, per entry, in entry order |
 | … | — | zero padding to a multiple of 8 |
 
-These two fields decide whether a skill is loaded at all. They used to be *indices* into the
+`count` may exceed one. A **bundle** makes node 0 a synthetic root and each skill one of its
+children, so a single file can carry a whole persona library and a loader can choose between
+them from the routing plane alone. `count = 1` with `root = 0` is an ordinary single-skill file.
+
+A routing entry must name either node 0 or a direct child of it (`Error::RoutingRootNotTopLevel`).
+Anything deeper would let an entry advertise a *section* as a skill, which the tier rules say
+nothing about.
+
+These fields decide whether a skill is loaded at all. They used to be *indices* into the
 sorted string heap, and sorting scatters them: reading them meant reading the manifest, measured
 at 1,524 bytes per skill to retrieve about 200 (§10.8). They now live in one run of bytes at the
 front of the file, and **nowhere else** — keeping them out of the heap is what preserves one
-encoding per logical value.
+encoding per logical value. Measured on a 40-skill bundle: 13,954 bytes of routing plane answers
+"which of these forty applies" with no body touched and nothing decompressed.
 
 The offset is derived rather than stored on purpose. An offset the manifest owns would put the
 name behind the manifest, which is the cost this block exists to avoid.
@@ -291,34 +300,35 @@ Built with `Profile::None`: a hexdump of a zstd frame teaches nothing about this
 payload and one tier-1 child carrying `"Do the thing.\n"`. `sig_count = 0`.
 
 ```
-00000000  8f 53 4b 4c 0d 0a 1a 0a  01 00 00 00 00 00 00 00   magic, v1.0, feature_flags=0
-00000010  be 01 00 00 70 00 00 00  40 01 00 00 00 00 00 00
-00000020  54 f7 ec 34 30 fa 42 cd  2e 1a de 8f 31 79 db 19   manifest_root (BLAKE3 of the manifest bytes)
-00000030  8a be 8a 81 90 75 3a c9  8e 85 fe 4c 53 90 5c 3e
-00000040  04 00 28 00 64 65 6d 6f  55 73 65 20 77 68 65 6e   routing block: name_len=4 desc_len=40, then the bytes
-00000050  20 64 65 6d 6f 6e 73 74  72 61 74 69 6e 67 20 74
-00000060  68 65 20 73 6b 69 6c 6c  20 66 6f 72 6d 61 74 2e
-00000070  04 00 00 00 00 00 00 00  00 00 00 00 ff ff ff ff   manifest: sect_count  flags=0 (uncompressed)
-00000080  ff ff ff ff 02 00 00 00  b0 01 00 00 00 00 00 00
-00000090  b0 01 00 00 0e 00 00 00  00 00 00 00 0e 00 00 00
-000000a0  01 00 00 00 90 00 00 00  08 00 00 00 00 00 00 00
-000000b0  08 00 00 00 00 00 00 00  02 00 00 00 98 00 00 00
-000000c0  40 00 00 00 02 00 00 00  40 00 00 00 00 00 00 00
-000000d0  04 00 00 00 d8 00 00 00  40 00 00 00 02 00 00 00
-000000e0  40 00 00 00 00 00 00 00  0b 00 00 00 18 01 00 00
-000000f0  24 00 00 00 01 00 00 00  24 00 00 00 00 00 00 00
-00000100  00 00 00 00 00 00 00 00  02 00 00 00 01 00 00 00
-00000110  ff ff ff ff 00 00 00 00  00 00 00 00 00 00 00 00
-00000120  00 00 00 00 ff ff ff ff  02 01 02 01 01 00 00 00
-00000130  ff ff ff ff 00 00 00 00  00 00 00 00 0e 00 00 00
-00000140  01 00 00 00 00 00 00 00  0b 6a a1 83 70 03 20 af
-00000150  4e ee d9 5f de 5d b7 0e  53 cb 5a 31 51 7c fb 9d
-00000160  8c 49 18 00 35 31 5e 13  1f 5d d5 ad 20 f5 3a 75
-00000170  65 56 8d 05 46 b5 73 f9  59 86 90 26 94 a3 4a b4
-00000180  02 f1 fc 1a 6b b3 10 a4  30 00 00 00 e7 d6 9e 6b
-00000190  76 94 51 76 77 48 f1 44  e5 47 97 fc 22 9d a5 66
-000001a0  6a 78 90 47 84 cc e1 7b  2a f0 41 82 00 00 00 00
-000001b0  44 6f 20 74 68 65 20 74  68 69 6e 67 2e 0a
+00000000  8f 53 4b 4c 0d 0a 1a 0a  02 00 00 00 00 00 00 00   magic, v1.0, feature_flags=0
+00000010  c6 01 00 00 78 00 00 00  40 01 00 00 00 00 00 00
+00000020  22 35 85 80 d0 8d f1 6d  a5 80 a7 0d e2 8e 9f 0d   manifest_root (BLAKE3 of the manifest bytes)
+00000030  35 ae f0 5e bd c0 28 c0  1d 37 d8 0c 2e a2 78 23
+00000040  01 00 00 00 00 00 00 00  04 00 28 00 64 65 6d 6f   routing block: name_len=4 desc_len=40, then the bytes
+00000050  55 73 65 20 77 68 65 6e  20 64 65 6d 6f 6e 73 74
+00000060  72 61 74 69 6e 67 20 74  68 65 20 73 6b 69 6c 6c
+00000070  20 66 6f 72 6d 61 74 2e  04 00 00 00 00 00 00 00   manifest: sect_count  flags=0 (uncompressed)
+00000080  00 00 00 00 ff ff ff ff  ff ff ff ff 02 00 00 00
+00000090  b8 01 00 00 00 00 00 00  b8 01 00 00 0e 00 00 00
+000000a0  00 00 00 00 0e 00 00 00  01 00 00 00 90 00 00 00
+000000b0  08 00 00 00 00 00 00 00  08 00 00 00 00 00 00 00
+000000c0  02 00 00 00 98 00 00 00  40 00 00 00 02 00 00 00
+000000d0  40 00 00 00 00 00 00 00  04 00 00 00 d8 00 00 00
+000000e0  40 00 00 00 02 00 00 00  40 00 00 00 00 00 00 00
+000000f0  0b 00 00 00 18 01 00 00  24 00 00 00 01 00 00 00
+00000100  24 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
+00000110  02 00 00 00 01 00 00 00  ff ff ff ff 00 00 00 00
+00000120  00 00 00 00 00 00 00 00  00 00 00 00 ff ff ff ff
+00000130  02 01 02 01 01 00 00 00  ff ff ff ff 00 00 00 00
+00000140  00 00 00 00 0e 00 00 00  01 00 00 00 00 00 00 00
+00000150  0b 6a a1 83 70 03 20 af  4e ee d9 5f de 5d b7 0e
+00000160  53 cb 5a 31 51 7c fb 9d  8c 49 18 00 35 31 5e 13
+00000170  1f 5d d5 ad 20 f5 3a 75  65 56 8d 05 46 b5 73 f9
+00000180  59 86 90 26 94 a3 4a b4  02 f1 fc 1a 6b b3 10 a4
+00000190  38 00 00 00 29 2b 99 be  ad 6d 2e 69 3d ed 2a 50
+000001a0  a5 9b 79 67 98 aa 05 33  56 6a c5 a6 b7 05 07 78
+000001b0  77 12 3b dc 00 00 00 00  44 6f 20 74 68 65 20 74
+000001c0  68 69 6e 67 2e 0a
 ```
 
 Note the string heap ordering: `"Use…"` (0x55) sorts before `"demo"` (0x64), so `name_idx = 1`
@@ -540,3 +550,17 @@ name behind the manifest again.
 
 The lesson generalises past this format: hoisting a *reference* into a hot structure does not
 hoist the data. Only bytes are hot.
+
+
+### 10.9 One skill per file was an assumption, not a requirement
+
+The graph always supported a file carrying several skills — node 0 as a synthetic root with one
+subtree per skill, tier monotonicity intact. Only *routing* assumed one, because the block held
+exactly one name and one description.
+
+§3.1 now holds `count` entries. That is an incompatible layout change rather than an additive
+one, and deliberately so: a v1 block began with `name_len` and a v2 block begins with `count`,
+and a one-character name is indistinguishable from a one-skill count. Two layouts that can be
+confused for each other must not be allowed to meet, so `ver_major` is `2` and a v1 reader
+rejects a v2 file outright rather than misreading it. Every file in the corpus is regenerable
+from its source, so nothing is lost.

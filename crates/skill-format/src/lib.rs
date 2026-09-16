@@ -117,12 +117,7 @@ impl<'a> Skill<'a> {
 
         let manifest = Manifest::parse(raw, dict)?;
 
-        let r = routing::read(bytes, header.routing_off())?;
-        let (want_len, want_hash) = manifest.routing.ok_or(Error::RoutingUncommitted)?;
-        let block = raw::bytes_at(bytes, header.routing_off(), r.stored_len)?;
-        if r.stored_len != want_len as usize || blake3::hash(block).as_bytes() != &want_hash {
-            return Err(Error::RoutingHashMismatch);
-        }
+        let r = check_routing_commitment(bytes, &header, &manifest)?;
         if let Some(want) = manifest.dict_hash {
             let have = dict.ok_or(Error::MissingDictionary)?;
             if have.digest() != want {
@@ -147,6 +142,8 @@ impl<'a> Skill<'a> {
         }
 
         let nodes = validate::graph(&manifest)?;
+
+        check_routing_roots(&r.entries, &nodes)?;
         let spans = validate::payload_spans(&manifest, &nodes);
         for (cold, region, name, compressed) in [
             (
@@ -194,16 +191,34 @@ impl<'a> Skill<'a> {
         })
     }
 
+    /// Every skill this file carries, in routing-block order.
+    ///
     /// # Errors
     /// Rejects a truncated or non-UTF-8 routing block.
+    pub fn skills(&self) -> Result<Vec<routing::Entry<'a>>> {
+        Ok(routing::read(self.bytes, self.header.routing_off())?.entries)
+    }
+
+    /// The first skill's name. A bundle has several; see [`Skill::skills`].
+    ///
+    /// # Errors
+    /// Rejects a truncated or non-UTF-8 routing block, or a file carrying no skills.
     pub fn name(&self) -> Result<&'a str> {
-        Ok(routing::read(self.bytes, self.header.routing_off())?.name)
+        routing::read(self.bytes, self.header.routing_off())?
+            .entries
+            .first()
+            .map(|e| e.name)
+            .ok_or(Error::RoutingEmpty)
     }
 
     /// # Errors
-    /// Rejects a truncated or non-UTF-8 routing block.
+    /// Rejects a truncated or non-UTF-8 routing block, or a file carrying no skills.
     pub fn description(&self) -> Result<&'a str> {
-        Ok(routing::read(self.bytes, self.header.routing_off())?.description)
+        routing::read(self.bytes, self.header.routing_off())?
+            .entries
+            .first()
+            .map(|e| e.description)
+            .ok_or(Error::RoutingEmpty)
     }
 
     /// Reads `name` and `description` and nothing else.
@@ -216,10 +231,9 @@ impl<'a> Skill<'a> {
     ///
     /// # Errors
     /// Rejects a malformed header or a truncated or non-UTF-8 routing block.
-    pub fn routing_view(bytes: &'a [u8]) -> Result<(&'a str, &'a str)> {
+    pub fn routing_view(bytes: &'a [u8]) -> Result<Vec<routing::Entry<'a>>> {
         let header = Header::parse(bytes)?;
-        let r = routing::read(bytes, header.routing_off())?;
-        Ok((r.name, r.description))
+        Ok(routing::read(bytes, header.routing_off())?.entries)
     }
 
     #[must_use]
@@ -366,6 +380,40 @@ impl<'a> Skill<'a> {
         }
         Ok(())
     }
+}
+
+/// Reads the routing block and checks it against the commitment the manifest carries.
+///
+/// The block lives outside the manifest, so without this it would be committed by nothing.
+fn check_routing_commitment<'a>(
+    bytes: &'a [u8],
+    header: &Header,
+    manifest: &Manifest<'_>,
+) -> Result<routing::Routing<'a>> {
+    let r = routing::read(bytes, header.routing_off())?;
+    if r.entries.is_empty() {
+        return Err(Error::RoutingEmpty);
+    }
+    let (want_len, want_hash) = manifest.routing.ok_or(Error::RoutingUncommitted)?;
+    let block = raw::bytes_at(bytes, header.routing_off(), r.stored_len)?;
+    if r.stored_len != want_len as usize || blake3::hash(block).as_bytes() != &want_hash {
+        return Err(Error::RoutingHashMismatch);
+    }
+    Ok(r)
+}
+
+/// A routing entry names a skill's root, and a skill is either the whole file or one child of
+/// the synthetic root. Anything deeper would let an entry advertise a section as if it were a
+/// skill, and the tier rules say nothing about that.
+fn check_routing_roots(entries: &[routing::Entry<'_>], nodes: &[Node]) -> Result<()> {
+    for e in entries {
+        let target = usize::try_from(e.root).ok().and_then(|i| nodes.get(i));
+        match target {
+            Some(n) if e.root == 0 || n.parent == 0 => {}
+            _ => return Err(Error::RoutingRootNotTopLevel(e.root)),
+        }
+    }
+    Ok(())
 }
 
 /// Bytes inside a payload region that no node claims are committed to by nothing, so they are

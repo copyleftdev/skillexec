@@ -62,9 +62,10 @@ fn routing_plane_precedes_every_payload() {
         s.header.routing_off() < s.header.manifest_off as usize,
         "routing must precede the manifest"
     );
-    let (name, desc) = Skill::routing_view(&bytes).unwrap();
-    assert_eq!(name, "rich");
-    assert!(desc.starts_with("Exercises"));
+    let entries = Skill::routing_view(&bytes).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "rich");
+    assert!(entries[0].description.starts_with("Exercises"));
 }
 
 #[test]
@@ -246,8 +247,8 @@ fn routing_reads_only_the_front_of_the_file() {
     // Everything routing needs lives before the manifest begins.
     let touched = s.header.routing_off() + r.stored_len;
     assert!(touched <= s.header.manifest_off as usize);
-    assert_eq!(r.name, "rich");
-    assert_eq!(Skill::routing_view(&bytes).unwrap().0, "rich");
+    assert_eq!(r.entries[0].name, "rich");
+    assert_eq!(Skill::routing_view(&bytes).unwrap()[0].name, "rich");
 
     // And the name is not duplicated in the string heap.
     for i in 0..s.manifest.string_count() {
@@ -274,4 +275,93 @@ fn a_tampered_routing_block_is_refused_at_open() {
     ));
     // The fast path still reads it, which is exactly why it is a hint and not a verdict.
     assert!(Skill::routing_view(&bytes).is_ok());
+}
+
+#[test]
+fn a_bundle_carries_several_skills_in_one_file() {
+    use skill_format::Builder;
+    let mut b = Builder::bundle();
+    for (name, desc, body) in [
+        (
+            "reviewer",
+            "Use when reviewing a diff.",
+            "Read the diff first.\n",
+        ),
+        ("archivist", "Use when filing notes.", "File by date.\n"),
+        (
+            "gardener",
+            "Use when pruning a corpus.",
+            "Prune, then measure.\n",
+        ),
+    ] {
+        let root = b.add_skill(name, desc);
+        b.child(
+            root,
+            Kind::Prose,
+            Tier::Body,
+            1,
+            Some("body"),
+            body.as_bytes().to_vec(),
+            1,
+        );
+    }
+    let bytes = b.build().unwrap();
+
+    // Routing lists all three without opening the file properly, and without touching a body.
+    let entries = Skill::routing_view(&bytes).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[1].name, "archivist");
+    assert!(
+        entries.iter().all(|e| e.root != 0),
+        "each skill roots at its own node"
+    );
+
+    let s = Skill::open(&bytes, &TrustPolicy::permissive()).unwrap();
+    s.verify_all().unwrap();
+    for e in &s.skills().unwrap() {
+        let kids = s.children_of(e.root);
+        assert_eq!(kids.len(), 1, "{} should have one body", e.name);
+        assert!(!s.verified_payload(kids[0]).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn a_single_skill_file_is_a_bundle_of_one() {
+    use common::rich;
+    let bytes = rich();
+    let s = Skill::open(&bytes, &TrustPolicy::permissive()).unwrap();
+    let skills = s.skills().unwrap();
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].root, 0, "a lone skill roots at node 0");
+    assert_eq!(skills[0].name, s.name().unwrap());
+}
+
+#[test]
+fn a_routing_entry_may_not_point_below_the_top_level() {
+    use common::{recommit, rich};
+    let original = rich();
+    let mut bytes = original.clone();
+    let off = Skill::open(&bytes, &TrustPolicy::permissive())
+        .unwrap()
+        .header
+        .routing_off();
+    let rlen = skill_format::routing::read(&bytes, off).unwrap().stored_len;
+    let before = *blake3::hash(&original[off..off + rlen]).as_bytes();
+
+    // Repoint the entry at a grandchild, then re-commit exactly as a publisher would: fix the
+    // routing hash the manifest carries, then the manifest root the header carries. Without
+    // both, the digest check rejects it first and the graph rule is never reached.
+    bytes[off + 4..off + 8].copy_from_slice(&3u32.to_le_bytes());
+    let after = *blake3::hash(&bytes[off..off + rlen]).as_bytes();
+    let at = bytes
+        .windows(32)
+        .position(|w| w == before)
+        .expect("the manifest commits to the routing block");
+    bytes[at..at + 32].copy_from_slice(&after);
+    recommit(&mut bytes);
+
+    assert!(matches!(
+        Skill::open(&bytes, &TrustPolicy::permissive()),
+        Err(Error::RoutingRootNotTopLevel(3))
+    ));
 }

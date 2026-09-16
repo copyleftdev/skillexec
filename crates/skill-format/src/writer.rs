@@ -92,6 +92,9 @@ pub struct Builder {
     nodes: Vec<BuildNode>,
     profile: Profile,
     dict: Option<crate::Dictionary>,
+    /// `(build index of the skill's root node, name, description)`. Empty means a single-skill
+    /// file whose root is node 0.
+    skills: Vec<(usize, String, String)>,
 }
 
 impl Builder {
@@ -105,7 +108,25 @@ impl Builder {
             nodes: Vec::new(),
             profile: Profile::default(),
             dict: None,
+            skills: Vec::new(),
         }
+    }
+
+    /// A file carrying several skills. Node 0 is a synthetic root and each skill is one of its
+    /// children; routing lists them all, so a loader can choose between them without reading a
+    /// single body.
+    #[must_use]
+    pub fn bundle() -> Self {
+        let mut b = Self::new("", "");
+        b.push(Kind::Prose, Tier::Routing, 0, Vec::new(), None, None, 0);
+        b
+    }
+
+    /// Adds a skill to a bundle and returns its root, for children to hang from.
+    pub fn add_skill(&mut self, name: impl Into<String>, description: impl Into<String>) -> NodeId {
+        let id = self.push(Kind::Prose, Tier::Routing, 0, Vec::new(), Some(0), None, 0);
+        self.skills.push((id.0, name.into(), description.into()));
+        id
     }
 
     #[must_use]
@@ -460,7 +481,21 @@ impl Builder {
             sections.push((SECT_DICTREF, d.digest().to_vec(), 1));
         }
 
-        let routing_block = routing::encode(&self.name, &self.desc)?;
+        let entries: Vec<(u32, String, String)> = if self.skills.is_empty() {
+            vec![(0, self.name.clone(), self.desc.clone())]
+        } else {
+            self.skills
+                .iter()
+                .map(|(build_idx, n, d)| {
+                    (
+                        u32::try_from(rank[*build_idx]).unwrap_or(NONE32),
+                        n.clone(),
+                        d.clone(),
+                    )
+                })
+                .collect()
+        };
+        let routing_block = routing::encode(&entries)?;
         let mut routing_sec = Vec::with_capacity(36);
         routing_sec.extend_from_slice(
             &u32::try_from(routing_block.len())

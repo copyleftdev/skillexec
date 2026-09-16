@@ -3,7 +3,11 @@ use crate::raw::{hash_at, u16_at, u32_at};
 
 pub const MAGIC: [u8; 8] = [0x8F, b'S', b'K', b'L', 0x0D, 0x0A, 0x1A, 0x0A];
 pub const HEADER_LEN: usize = 64;
-pub const VERSION_MAJOR: u16 = 1;
+/// Bumped from 1 for the multi-entry routing block. A v1 file's routing block began with
+/// `name_len`, a v2 file's with `count`, and a one-character name is indistinguishable from a
+/// one-skill count — so the two layouts must not be allowed to meet. Readers reject an unknown
+/// major, which is exactly the case this is.
+pub const VERSION_MAJOR: u16 = 2;
 pub const VERSION_MINOR: u16 = 0;
 
 /// Every feature bit this reader implements. A file asserting anything outside this mask is

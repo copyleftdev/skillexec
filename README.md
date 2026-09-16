@@ -26,6 +26,10 @@ corpusctl clone --list repos.tsv --dest repos --jobs 8 --budget-gb 40
 corpusctl build --dest repos --out corpus.txt --exclude other-corpus.txt
 corpusctl run   --list corpus.txt --out results
 
+# many skills in one signed, verifiable file
+skillc bundle <list-of-SKILL.md> personas.skill
+skillc show   personas.skill
+
 # or drive one experiment directly
 skillc roles  <list>    # does the heading taxonomy generalise?
 skillc cas    <list>    # what a corpus-wide content-addressed store would save
@@ -66,6 +70,10 @@ vocabulary. Compiling it buys three things Markdown cannot:
   `crates/skill-run` then enforces that set at **link time**: a wasm module reaches the host only
   through its imports, so an undeclared import is never satisfied and the module never
   instantiates.
+- **One file can carry many skills.** A bundle roots each skill at a child of node 0 and lists
+  them all in the routing block, so choosing between forty personas costs one read of 13,954
+  bytes and touches no body. Forty real skills compile to a single 166 KB file, 61% smaller than
+  their source.
 - **Verification precedes parsing.** Signatures cover a fixed 64-byte range that commits to the
   manifest root, which commits to every section and subtree hash. The parser only ever runs on
   bytes already proven to be the publisher's.

@@ -394,6 +394,24 @@ twenty minutes without producing a number. A `HashMap` took the same run to **6 
 tool had to be pointed at a corpus an order of magnitude past its author's own before its
 complexity showed up at all — which is the argument for dogfooding at a scale you do not control.
 
+## Bundles
+
+A file may carry many skills: node 0 becomes a synthetic root, each skill is one of its children,
+and the routing block lists them all (`SPEC.md` §3.1).
+
+Forty real skills from `~/.claude/skills`, compiled into one file:
+
+| | |
+|---|---|
+| source | 0.41 MB across 40 directories |
+| bundle | **0.16 MB** (−61.1%), one file |
+| routing plane | 13,954 bytes for all forty |
+| nodes / segments | 1,195 / 74 |
+
+Choosing among the forty reads 13,954 bytes and decompresses nothing. The 61% is dictionary-free
+`Compact`: the personas share a house style, and content-addressed payloads collapse the overlap
+before zstd sees it.
+
 ## Assembling a corpus
 
 The corpus tooling was shell first and is Rust now, because the shell version was the single

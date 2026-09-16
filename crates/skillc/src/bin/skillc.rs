@@ -73,6 +73,19 @@ fn main() {
         Some("cas") => {
             cas_census(args.get(1).map_or("-", String::as_str));
         }
+        Some("show") => {
+            let path = args.get(1).map_or("bundle.skill", String::as_str);
+            let dict = flag(&args, "--dict")
+                .map(|p| Dictionary::new(&std::fs::read(p).expect("read dictionary")));
+            show(path, dict.as_ref());
+        }
+        Some("bundle") => {
+            let list = args.get(1).map_or("-", String::as_str);
+            let out = args.get(2).map_or("bundle.skill", String::as_str);
+            let dict = flag(&args, "--dict")
+                .map(|p| Dictionary::new(&std::fs::read(p).expect("read dictionary")));
+            make_bundle(list, out, dict.as_ref());
+        }
         Some("dict") => {
             let list = args.get(1).map_or("-", String::as_str);
             let out = args.get(2).map_or("corpus.dict", String::as_str);
@@ -84,6 +97,67 @@ fn main() {
             "usage: skillc <SKILL.md>\n       skillc corpus <list> [limit] [--profile P] [--dict F]\n       skillc route  <list> [--profile P] [--dict F]\n       skillc roles  <list>\n       skillc cas    <list>\n       skillc dict   <list> <out.dict> [max-bytes]"
         ),
     }
+}
+
+/// Lists what a container carries, reading the routing plane before anything else.
+fn show(path: &str, dict: Option<&Dictionary>) {
+    let bytes = std::fs::read(path).expect("read container");
+
+    // Routing first, and on its own: this is the read a router would do, and it touches no body.
+    let entries = Skill::routing_view(&bytes).expect("routing");
+    println!("{} skills in {} bytes\n", entries.len(), bytes.len());
+    for e in &entries {
+        let d: String = e.description.chars().take(72).collect();
+        println!("  {:<28} {}", e.name, d);
+    }
+
+    let s = Skill::open_with(&bytes, &TrustPolicy::permissive(), dict).expect("open");
+    s.verify_all().expect("verify");
+    println!(
+        "\nnodes {}  segments {}  signatures {}  verified ok",
+        s.nodes.len(),
+        s.manifest.segment_count(),
+        s.signatures.len()
+    );
+}
+
+/// Compiles every skill in a list into one file, each a top-level skill in the routing block.
+fn make_bundle(list: &str, out: &str, dict: Option<&Dictionary>) {
+    let listing = std::fs::read_to_string(list).expect("read list");
+    let mut docs = Vec::new();
+    let mut src_bytes = 0usize;
+    for line in listing.lines() {
+        let path = PathBuf::from(line);
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        src_bytes += src.len();
+        let doc = md::parse(&src);
+        let name = doc.get("name").unwrap_or(&stem(&path)).to_string();
+        let desc = doc.get("description").unwrap_or("").to_string();
+        docs.push((name, desc, doc));
+    }
+    let (bytes, st) = skillc::bundle(&docs, Profile::Compact, dict).expect("bundle");
+    std::fs::write(out, &bytes).expect("write bundle");
+
+    let entries = Skill::routing_view(&bytes).expect("routing");
+    println!("skills           {}", entries.len());
+    println!("nodes            {}", st.nodes);
+    println!("segments         {}", st.segments);
+    println!(
+        "size             {:.2} MB src -> {:.2} MB bundle ({:+.1}%)",
+        src_bytes as f64 / 1.048_576e6,
+        bytes.len() as f64 / 1.048_576e6,
+        (bytes.len() as f64 / src_bytes.max(1) as f64 - 1.0) * 100.0
+    );
+    let routing: usize = entries
+        .iter()
+        .map(|e| e.name.len() + e.description.len())
+        .sum();
+    println!(
+        "routing plane    {routing} B for all {} skills",
+        entries.len()
+    );
 }
 
 /// Does the heading taxonomy generalise, or was it fitted to the corpus it was derived from?
@@ -267,8 +341,11 @@ fn route_bench(list: &str, profile: Profile, dict: Option<&Dictionary>) {
     let t0 = std::time::Instant::now();
     let mut acc = 0usize;
     for c in &containers {
-        if let Ok((name, desc)) = Skill::routing_view(c) {
-            acc += name.len() + desc.len();
+        if let Ok(entries) = Skill::routing_view(c) {
+            acc += entries
+                .iter()
+                .map(|e| e.name.len() + e.description.len())
+                .sum::<usize>();
         }
     }
     let container_ns = t0.elapsed().as_nanos() / n.max(1) as u128;

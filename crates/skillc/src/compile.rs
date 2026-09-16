@@ -53,8 +53,22 @@ pub fn compile_with(
         b = b.license(l);
     }
 
-    let mut st = Stats::default();
     let root = b.root(Kind::Prose, Tier::Routing, ROLE_INTENT, Vec::new());
+    let st = build_into(&mut b, root, doc);
+    let bytes = b.build()?;
+    Ok((bytes, st))
+}
+
+/// Builds one skill's subtree under `root`, which the caller has already created.
+///
+/// Separated out so a bundle can hang several of these off one synthetic root; a single-skill
+/// file is the same code with `root` being node 0.
+///
+/// # Panics
+/// Panics only if the heading stack loses its root, which the loop maintains as an invariant.
+#[allow(clippy::too_many_lines)]
+pub fn build_into(b: &mut Builder, root: NodeId, doc: &Document) -> Stats {
+    let mut st = Stats::default();
 
     if !doc.fm_raw.is_empty() {
         b.child(
@@ -165,9 +179,34 @@ pub fn compile_with(
         }
     }
 
-    let bytes = b.build()?;
     st.nodes += 1;
-    Ok((bytes, st))
+    st
+}
+
+/// Compiles many documents into one file, each a top-level skill.
+///
+/// # Errors
+/// Propagates any violation the writer detects while canonicalising the graph.
+pub fn bundle(
+    docs: &[(String, String, Document)],
+    profile: Profile,
+    dict: Option<&Dictionary>,
+) -> Result<(Vec<u8>, Stats)> {
+    let mut b = Builder::bundle().profile(profile);
+    if let Some(d) = dict {
+        b = b.dictionary(d.clone());
+    }
+    let mut total = Stats::default();
+    for (name, desc, doc) in docs {
+        let root = b.add_skill(name.clone(), desc.clone());
+        let st = build_into(&mut b, root, doc);
+        total.nodes += st.nodes;
+        total.segments += st.segments;
+        total.fences += st.fences;
+        total.tier_clamps += st.tier_clamps;
+        total.headings += st.headings;
+    }
+    Ok((b.build()?, total))
 }
 
 #[must_use]
