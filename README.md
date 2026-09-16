@@ -5,6 +5,15 @@
 A binary container for agent skills: `SKILL.md` compiled into a signed, mmap-able, lazily
 verified graph with executable segments.
 
+## Watch it compile
+
+[![skillexec — the compile sequence](https://img.youtube.com/vi/wXvv49XKYg8/maxresdefault.jpg)](https://www.youtube.com/watch?v=wXvv49XKYg8 "skillexec — the compile sequence · 3 min")
+
+Three minutes, narrated: a `SKILL.md` parsed into typed nodes, sorted into tiers, linearised into
+pre-order, committed with BLAKE3, compressed, signed, and finally composed into an organization —
+then what the whole thing saves. Every figure on screen is measured, and the two that are
+assumptions say so.
+
 - `docs/GRAPH.md` — the data model, derived by measuring 8,776 real `SKILL.md` files
 - `docs/SPEC.md` — the byte layout, verification order, conformance corpus, and the defects
   that writing the implementation forced back into the spec (§10)
