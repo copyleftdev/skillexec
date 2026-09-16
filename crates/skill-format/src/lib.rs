@@ -5,6 +5,7 @@
 //! `SPEC.md` §5 touch no variable-length data, so the parser only ever runs on bytes already
 //! proven to be the publisher's.
 
+pub mod codec;
 pub mod error;
 pub mod graph;
 pub mod header;
@@ -14,14 +15,17 @@ pub mod sig;
 mod validate;
 pub mod writer;
 
+pub use codec::Dictionary;
 pub use error::{Error, Result};
 pub use graph::{Abi, Edge, EdgeKind, Kind, Node, Segment, Tier, TrustClass, cap_kind};
 pub use header::Header;
 pub use manifest::Manifest;
 pub use sig::{SigEntry, TrustPolicy};
-pub use writer::{Builder, Cap, NodeId, SegmentSpec};
+pub use writer::{Builder, Cap, NodeId, Profile, SegmentSpec};
 
 use graph::{NONE32, node_flags};
+use manifest::manifest_flags;
+use std::sync::OnceLock;
 
 const NODE_DOMAIN: &[u8] = b"skill.v1.node\0";
 
@@ -62,6 +66,11 @@ pub struct Skill<'a> {
     pub nodes: Vec<Node>,
     pub signatures: Vec<SigEntry>,
     children: Vec<Vec<u32>>,
+    dict: Option<&'a Dictionary>,
+    /// Decompressed lazily and at most once. A compressed COLD region is never touched by
+    /// routing, which is the whole reason the tiers are separate regions in the first place.
+    hot: OnceLock<Vec<u8>>,
+    cold: OnceLock<Vec<u8>>,
 }
 
 impl<'a> Skill<'a> {
@@ -69,6 +78,19 @@ impl<'a> Skill<'a> {
     /// # Errors
     /// Rejects at the first failing step of `SPEC.md` §5; [`Error::step`] reports which.
     pub fn open(bytes: &'a [u8], policy: &TrustPolicy) -> Result<Self> {
+        Self::open_with(bytes, policy, None)
+    }
+
+    /// As [`Skill::open`], with a shared zstd dictionary. A file that names a dictionary it was
+    /// not given is refused rather than read wrong.
+    ///
+    /// # Errors
+    /// As [`Skill::open`], plus [`Error::MissingDictionary`] and [`Error::WrongDictionary`].
+    pub fn open_with(
+        bytes: &'a [u8],
+        policy: &TrustPolicy,
+        dict: Option<&'a Dictionary>,
+    ) -> Result<Self> {
         let header = Header::parse(bytes)?;
         let signatures = sig::verify(bytes, header.sig_count, policy)?;
 
@@ -92,7 +114,13 @@ impl<'a> Skill<'a> {
             return Err(Error::ManifestDigestMismatch);
         }
 
-        let manifest = Manifest::parse(raw)?;
+        let manifest = Manifest::parse(raw, dict)?;
+        if let Some(want) = manifest.dict_hash {
+            let have = dict.ok_or(Error::MissingDictionary)?;
+            if have.digest() != want {
+                return Err(Error::WrongDictionary);
+            }
+        }
         for (region, what) in [(manifest.hot, "hot region"), (manifest.cold, "cold region")] {
             let e = region
                 .0
@@ -105,20 +133,41 @@ impl<'a> Skill<'a> {
                     len: region.1,
                 });
             }
+            if region.2 > manifest::MAX_SECTION_BYTES {
+                return Err(Error::DeclaredLenMismatch { what });
+            }
         }
 
         let nodes = validate::graph(&manifest)?;
         let spans = validate::payload_spans(&manifest, &nodes);
-        for (cold, region, name) in [
-            (false, manifest.hot, "hot region"),
-            (true, manifest.cold, "cold region"),
+        for (cold, region, name, compressed) in [
+            (
+                false,
+                manifest.hot,
+                "hot region",
+                manifest.flags & manifest_flags::HOT_ZSTD != 0,
+            ),
+            (
+                true,
+                manifest.cold,
+                "cold region",
+                manifest.flags & manifest_flags::COLD_ZSTD != 0,
+            ),
         ] {
+            if compressed {
+                // There is nothing to inspect in place: the stored bytes are a zstd frame, and
+                // every one of them is covered by the region hash checked at decompression.
+                if manifest.region_hashes.is_none() {
+                    return Err(Error::UncommittedRegion(name));
+                }
+                continue;
+            }
             let mine: Vec<(u32, u32)> = spans
                 .iter()
                 .filter(|s| s.0 == cold)
                 .map(|s| (s.1, s.2))
                 .collect();
-            check_region_padding(bytes, region, &mine, name)?;
+            check_region_padding(bytes, (region.0, region.1), &mine, name)?;
         }
         let mut children = vec![Vec::new(); nodes.len()];
         for (i, n) in nodes.iter().enumerate().skip(1) {
@@ -131,18 +180,21 @@ impl<'a> Skill<'a> {
             nodes,
             signatures,
             children,
+            dict,
+            hot: OnceLock::new(),
+            cold: OnceLock::new(),
         })
     }
 
     /// # Errors
     /// Rejects a manifest whose name index does not resolve.
-    pub fn name(&self) -> Result<&'a str> {
+    pub fn name(&self) -> Result<&str> {
         self.manifest.string(self.manifest.name_idx)
     }
 
     /// # Errors
     /// Rejects a manifest whose description index does not resolve.
-    pub fn description(&self) -> Result<&'a str> {
+    pub fn description(&self) -> Result<&str> {
         self.manifest.string(self.manifest.desc_idx)
     }
 
@@ -151,15 +203,18 @@ impl<'a> Skill<'a> {
     /// # Errors
     /// Rejects a malformed header or manifest. Performs no signature check: callers that
     /// need one open the file properly.
-    pub fn routing_view(bytes: &'a [u8]) -> Result<(&'a str, &'a str)> {
+    pub fn routing_view(bytes: &'a [u8], dict: Option<&'a Dictionary>) -> Result<(String, String)> {
         let header = Header::parse(bytes)?;
         let raw = raw::bytes_at(
             bytes,
             header.manifest_off as usize,
             header.manifest_len as usize,
         )?;
-        let m = Manifest::parse(raw)?;
-        Ok((m.string(m.name_idx)?, m.string(m.desc_idx)?))
+        let m = Manifest::parse(raw, dict)?;
+        Ok((
+            m.string(m.name_idx)?.to_owned(),
+            m.string(m.desc_idx)?.to_owned(),
+        ))
     }
 
     #[must_use]
@@ -167,10 +222,54 @@ impl<'a> Skill<'a> {
         self.children.get(idx as usize).map_or(&[], Vec::as_slice)
     }
 
+    /// The decompressed bytes of one payload region, decompressing on first touch.
+    ///
+    /// # Errors
+    /// Rejects a region whose stored bytes do not match the committed hash, or whose frame does
+    /// not decompress to exactly the declared length.
+    pub fn region(&self, cold: bool) -> Result<&[u8]> {
+        let (region, flag, cell, which) = if cold {
+            (
+                self.manifest.cold,
+                manifest_flags::COLD_ZSTD,
+                &self.cold,
+                "cold region",
+            )
+        } else {
+            (
+                self.manifest.hot,
+                manifest_flags::HOT_ZSTD,
+                &self.hot,
+                "hot region",
+            )
+        };
+        let stored = raw::bytes_at(self.bytes, region.0 as usize, region.1 as usize)?;
+        if self.manifest.flags & flag == 0 {
+            return Ok(stored);
+        }
+        if let Some(v) = cell.get() {
+            return Ok(v);
+        }
+        let pair = self
+            .manifest
+            .region_hashes
+            .ok_or(Error::UncommittedRegion(which))?;
+        let want = if cold { pair.1 } else { pair.0 };
+        if blake3::hash(stored).as_bytes() != &want {
+            return Err(Error::RegionHashMismatch(which));
+        }
+        let out = codec::decompress(stored, region.2 as usize, self.dict)
+            .map_err(|_| Error::DeclaredLenMismatch { what: which })?;
+        if out.len() != region.2 as usize {
+            return Err(Error::DeclaredLenMismatch { what: which });
+        }
+        Ok(cell.get_or_init(|| out))
+    }
+
     /// Raw payload bytes. Unverified by design: callers that care use [`Skill::verified_payload`].
     /// # Errors
     /// Rejects an out-of-range node index or a payload range outside its region.
-    pub fn payload(&self, idx: u32) -> Result<&'a [u8]> {
+    pub fn payload(&self, idx: u32) -> Result<&[u8]> {
         let n = *self
             .nodes
             .get(idx as usize)
@@ -178,33 +277,43 @@ impl<'a> Skill<'a> {
         if n.payload_len == 0 {
             return Ok(&[]);
         }
-        let (base, _) = if n.flags & node_flags::PAYLOAD_COLD != 0 {
-            self.manifest.cold
-        } else {
-            self.manifest.hot
-        };
-        raw::bytes_at(
-            self.bytes,
-            base as usize + n.payload_off as usize,
-            n.payload_len as usize,
-        )
+        let region = self.region(n.flags & node_flags::PAYLOAD_COLD != 0)?;
+        raw::bytes_at(region, n.payload_off as usize, n.payload_len as usize)
     }
 
     /// `SPEC.md` §5 step 7: lazy verification against the signed subtree commitment.
     /// # Errors
     /// Rejects a payload whose recomputed subtree hash differs from the signed
     /// commitment (`SPEC.md` §5 step 7).
-    pub fn verified_payload(&self, idx: u32) -> Result<&'a [u8]> {
-        let want = self.manifest.hash(
-            self.nodes
-                .get(idx as usize)
-                .ok_or(Error::NodeIndexOutOfRange(idx))?
-                .hash_idx,
-        )?;
-        if self.compute_subtree(idx)? != want {
+    pub fn verified_payload(&self, idx: u32) -> Result<&[u8]> {
+        let at = self.commitment_for(idx)?;
+        let want = self.manifest.hash(self.nodes[at as usize].hash_idx)?;
+        if self.compute_subtree(at)? != want {
             return Err(Error::PayloadHashMismatch(idx));
         }
         self.payload(idx)
+    }
+
+    /// The nearest node at or above `idx` that carries a stored commitment. Interior nodes have
+    /// none, so verifying one means verifying the smallest committed subtree containing it.
+    ///
+    /// # Errors
+    /// Rejects an out-of-range index, or a tree whose root carries no commitment.
+    pub fn commitment_for(&self, idx: u32) -> Result<u32> {
+        let mut cur = idx;
+        loop {
+            let n = *self
+                .nodes
+                .get(cur as usize)
+                .ok_or(Error::NodeIndexOutOfRange(idx))?;
+            if n.hash_idx != NONE32 {
+                return Ok(cur);
+            }
+            if n.parent == NONE32 {
+                return Err(Error::RootHasNoCommitment);
+            }
+            cur = n.parent;
+        }
     }
 
     /// # Errors
@@ -242,6 +351,9 @@ impl<'a> Skill<'a> {
     /// Rejects the first node whose stored commitment does not match its subtree.
     pub fn verify_all(&self) -> Result<()> {
         for i in 0..u32::try_from(self.nodes.len()).unwrap_or(0) {
+            if self.nodes[i as usize].hash_idx == NONE32 {
+                continue;
+            }
             let want = self.manifest.hash(self.nodes[i as usize].hash_idx)?;
             if self.compute_subtree(i)? != want {
                 return Err(Error::PayloadHashMismatch(i));

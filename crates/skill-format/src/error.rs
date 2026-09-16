@@ -97,6 +97,11 @@ pub enum Error {
     DeclaredLenMismatch {
         what: &'static str,
     },
+    RootHasNoCommitment,
+    MissingDictionary,
+    WrongDictionary,
+    UncommittedRegion(&'static str),
+    RegionHashMismatch(&'static str),
 }
 
 impl Error {
@@ -114,7 +119,9 @@ impl Error {
             | Self::OffsetOverflow { .. }
             | Self::RangeOutOfBounds { .. } => 4,
             Self::ManifestDigestMismatch => 5,
-            Self::PayloadHashMismatch(_) | Self::SegmentHashMismatch(_) => 7,
+            Self::PayloadHashMismatch(_)
+            | Self::SegmentHashMismatch(_)
+            | Self::RegionHashMismatch(_) => 7,
             _ => 6,
         }
     }

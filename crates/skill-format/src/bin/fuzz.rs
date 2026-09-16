@@ -67,6 +67,7 @@ fn parse_args() -> Budget {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn seeds() -> Vec<Vec<u8>> {
     let mut out = Vec::new();
 
@@ -169,6 +170,22 @@ fn seeds() -> Vec<Vec<u8>> {
     b.edge(s2, EdgeKind::Alt, doc, 0, 0);
     b.edge(body, EdgeKind::Cites, doc, 0, 0);
     out.push(b.build().expect("rich seed"));
+
+    // A compressed seed, so mutations reach the decompression path rather than stopping at the
+    // structure checks. Without one, every zstd frame in the corpus is unreachable.
+    let body = "Compressible prose that a real skill would contain. ".repeat(120);
+    let mut b = Builder::new("bulky", "A body worth compressing.");
+    let root = b.root(Kind::Prose, Tier::Routing, 1, Vec::new());
+    b.child(
+        root,
+        Kind::Prose,
+        Tier::Body,
+        1,
+        Some("body"),
+        body.into_bytes(),
+        1,
+    );
+    out.push(b.build().expect("bulky seed"));
     out
 }
 

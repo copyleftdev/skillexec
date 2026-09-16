@@ -7,6 +7,25 @@ pub const ROLE_INTENT: u16 = 1;
 pub const ROLE_STEP: u16 = 2;
 pub const ROLE_PITFALL: u16 = 3;
 
+/// An uncompressed build, for the tests that reason about bytes in place.
+#[must_use]
+#[allow(clippy::missing_panics_doc)]
+pub fn minimal_raw() -> Vec<u8> {
+    let mut b = Builder::new("demo", "Use when demonstrating the skill format.")
+        .profile(skill_format::Profile::None);
+    let root = b.root(Kind::Prose, Tier::Routing, ROLE_INTENT, &b""[..]);
+    b.child(
+        root,
+        Kind::Prose,
+        Tier::Body,
+        ROLE_INTENT,
+        None,
+        &b"Do the thing.\n"[..],
+        1,
+    );
+    b.build().expect("minimal builds")
+}
+
 #[must_use]
 #[allow(clippy::missing_panics_doc)]
 pub fn minimal() -> Vec<u8> {
@@ -131,6 +150,26 @@ pub fn rich() -> Vec<u8> {
     b.build().expect("rich builds")
 }
 
+/// A skill whose body is large enough that zstd actually wins. Real skills are 5.5 KB at the
+/// median, so this is the ordinary case, not an extreme one.
+#[must_use]
+#[allow(clippy::missing_panics_doc)]
+pub fn bulky() -> Vec<u8> {
+    let body = "The quick brown fox jumps over the lazy dog. ".repeat(200);
+    let mut b = Builder::new("bulky", "A body worth compressing.");
+    let root = b.root(Kind::Prose, Tier::Routing, ROLE_INTENT, &b""[..]);
+    b.child(
+        root,
+        Kind::Prose,
+        Tier::Body,
+        ROLE_INTENT,
+        Some("body"),
+        body.into_bytes(),
+        1,
+    );
+    b.build().expect("bulky builds")
+}
+
 /// Rebuilds a `Builder` from a parsed file. `serialize(parse(b)) == b` only holds if the
 /// reader recovered every canonical decision the writer made.
 #[must_use]
@@ -220,13 +259,16 @@ pub fn recommit(bytes: &mut [u8]) {
     bytes[0x20..0x40].copy_from_slice(&root);
 }
 
+/// Section directory entries are 24 bytes since compression added `orig_len`.
+pub const DIR_ENTRY: usize = 24;
+
 #[must_use]
 #[allow(clippy::missing_panics_doc)]
 pub fn section_off(bytes: &[u8], id: u16) -> usize {
     let moff = u32::from_le_bytes(bytes[0x14..0x18].try_into().unwrap()) as usize;
     let n = u16::from_le_bytes(bytes[moff..moff + 2].try_into().unwrap()) as usize;
     for i in 0..n {
-        let d = moff + 48 + 16 * i;
+        let d = moff + 48 + DIR_ENTRY * i;
         if u16::from_le_bytes(bytes[d..d + 2].try_into().unwrap()) == id {
             return moff + u32::from_le_bytes(bytes[d + 4..d + 8].try_into().unwrap()) as usize;
         }

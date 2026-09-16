@@ -1,6 +1,6 @@
 mod common;
 
-use common::{minimal, recommit, rich, section_off};
+use common::{DIR_ENTRY, bulky, minimal, minimal_raw, recommit, rich, section_off};
 use skill_format::{Error, Skill, TrustPolicy};
 
 const SECT_NODES: u16 = 2;
@@ -127,11 +127,46 @@ fn tampered_payload_fails_lazy_verification() {
 }
 
 #[test]
-fn uncommitted_padding_must_be_zero() {
-    let mut b = minimal();
-    let last = b.len() - 1;
-    b[last] = 0xAA;
+fn uncommitted_region_bytes_must_be_zero() {
+    // The writer no longer pads regions at all, so this condition has to be built by hand:
+    // shrink a node's payload by one byte and the byte it abandons belongs to nobody. That is
+    // the case the rule exists for -- a hostile writer leaving bytes no commitment covers.
+    let mut b = minimal_raw();
+    let at = node_field(&b, 1, 20);
+    let len = u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+    patch_manifest(&mut b, at, &(len - 1).to_le_bytes());
     assert!(matches!(rejects(&b, 6), Error::UncommittedNonZero { .. }));
+}
+
+#[test]
+fn a_compressed_region_must_carry_its_commitment() {
+    let b = bulky();
+    let s = open(&b).expect("bulky opens");
+    assert!(
+        s.manifest.region_hashes.is_some(),
+        "a compressed region must commit to its stored bytes"
+    );
+    assert!(
+        s.manifest.cold.1 < s.manifest.cold.2,
+        "cold region should have shrunk"
+    );
+    assert_eq!(s.payload(1).unwrap().len(), s.manifest.cold.2 as usize);
+}
+
+#[test]
+fn tampering_a_compressed_region_is_caught_on_decompression() {
+    let mut b = bulky();
+    let (off, len) = {
+        let s = open(&b).unwrap();
+        (s.manifest.cold.0 as usize, s.manifest.cold.1 as usize)
+    };
+    assert!(len > 0);
+    b[off + len / 2] ^= 0xFF;
+    let s = open(&b).expect("structure is untouched");
+    assert!(matches!(
+        s.payload(1),
+        Err(Error::RegionHashMismatch(_) | Error::DeclaredLenMismatch { .. })
+    ));
 }
 
 #[test]
@@ -247,10 +282,11 @@ fn section_length_must_match_its_record_size() {
     let sect_count = u16::from_le_bytes(b[moff..moff + 2].try_into().unwrap()) as usize;
     let mut patched = false;
     for i in 0..sect_count {
-        let d = moff + 48 + 16 * i;
+        let d = moff + 48 + DIR_ENTRY * i;
         if u16::from_le_bytes(b[d..d + 2].try_into().unwrap()) == SECT_NODES {
             let len = u32::from_le_bytes(b[d + 8..d + 12].try_into().unwrap());
             b[d + 8..d + 12].copy_from_slice(&(len - 1).to_le_bytes());
+            b[d + 16..d + 20].copy_from_slice(&(len - 1).to_le_bytes());
             patched = true;
         }
     }
@@ -278,7 +314,7 @@ fn unknown_advisory_section_is_ignored() {
     let mut b = rich();
     let moff = u32::from_le_bytes(b[0x14..0x18].try_into().unwrap()) as usize;
     let sect_count = u16::from_le_bytes(b[moff..moff + 2].try_into().unwrap()) as usize;
-    let d = moff + 48 + 16 * (sect_count - 1);
+    let d = moff + 48 + DIR_ENTRY * (sect_count - 1);
     let keep = b[d..d + 16].to_vec();
     b[d..d + 2].copy_from_slice(&998u16.to_le_bytes());
     b[d + 2..d + 4].copy_from_slice(&0u16.to_le_bytes());
@@ -358,4 +394,45 @@ fn cites_may_still_cycle_because_it_carries_no_obligation() {
     b.edge(c, EdgeKind::Cites, a, 0, 0);
     let bytes = b.build().unwrap();
     open(&bytes).expect("a CITES cycle is legal");
+}
+
+#[test]
+fn a_declared_length_cannot_become_an_allocation() {
+    // The classic decompression bomb: claim an enormous uncompressed size and let the reader
+    // allocate it. `orig_len` is capped and the decoder is given a bounded buffer, so the claim
+    // is refused rather than honoured.
+    let mut b = bulky();
+    let moff = u32::from_le_bytes(b[0x14..0x18].try_into().unwrap()) as usize;
+    b[moff + 0x2C..moff + 0x30].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+    recommit(&mut b);
+    let e = open(&b).expect_err("an absurd orig_len must be refused");
+    assert!(matches!(e, Error::DeclaredLenMismatch { .. }), "got {e:?}");
+}
+
+#[test]
+fn a_frame_must_decompress_to_exactly_its_declared_length() {
+    let mut b = bulky();
+    let moff = u32::from_le_bytes(b[0x14..0x18].try_into().unwrap()) as usize;
+    let orig = u32::from_le_bytes(b[moff + 0x2C..moff + 0x30].try_into().unwrap());
+    b[moff + 0x2C..moff + 0x30].copy_from_slice(&(orig + 1).to_le_bytes());
+    recommit(&mut b);
+    let s = open(&b).expect("structure is fine until the region is touched");
+    assert!(matches!(
+        s.payload(1),
+        Err(Error::DeclaredLenMismatch { .. })
+    ));
+}
+
+#[test]
+fn a_section_may_not_claim_an_orig_len_it_does_not_have() {
+    let mut b = rich();
+    let moff = u32::from_le_bytes(b[0x14..0x18].try_into().unwrap()) as usize;
+    let d = moff + 48;
+    let orig = u32::from_le_bytes(b[d + 16..d + 20].try_into().unwrap());
+    b[d + 16..d + 20].copy_from_slice(&(orig + 8).to_le_bytes());
+    recommit(&mut b);
+    assert!(matches!(
+        rejects(&b, 6),
+        Error::DeclaredLenMismatch { .. } | Error::SectionCountMismatch { .. }
+    ));
 }

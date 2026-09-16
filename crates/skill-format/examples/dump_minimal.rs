@@ -1,7 +1,10 @@
-use skill_format::{Builder, Kind, Skill, Tier, TrustPolicy};
+use skill_format::{Builder, Kind, Profile, Skill, Tier, TrustPolicy};
 
 fn main() {
-    let mut b = Builder::new("demo", "Use when demonstrating the skill format.");
+    // The worked example in SPEC.md §7 is uncompressed on purpose: a hexdump of a zstd frame
+    // teaches nothing about this format.
+    let mut b =
+        Builder::new("demo", "Use when demonstrating the skill format.").profile(Profile::None);
     let root = b.root(Kind::Prose, Tier::Routing, 1, &b""[..]);
     b.child(
         root,

@@ -1,4 +1,4 @@
-use skill_format::{Abi, Builder, Kind, NodeId, Result, SegmentSpec, Tier};
+use skill_format::{Abi, Builder, Dictionary, Kind, NodeId, Profile, Result, SegmentSpec, Tier};
 
 use crate::classify::{
     self, ROLE_CONTINUATION, ROLE_FENCE, ROLE_FENCE_UNCLOSED, ROLE_FRONTMATTER, ROLE_INTENT,
@@ -23,9 +23,29 @@ pub struct Stats {
 /// Panics only if the heading stack loses its root, which the loop maintains as an invariant.
 #[allow(clippy::too_many_lines)]
 pub fn compile(doc: &Document, fallback_name: &str) -> Result<(Vec<u8>, Stats)> {
+    compile_with(doc, fallback_name, Profile::default(), None)
+}
+
+/// Compiles with an explicit compression profile and optional shared dictionary.
+///
+/// # Errors
+/// Propagates any violation the writer detects while canonicalising the graph.
+///
+/// # Panics
+/// Panics only if the heading stack loses its root, which the loop maintains as an invariant.
+#[allow(clippy::too_many_lines)]
+pub fn compile_with(
+    doc: &Document,
+    fallback_name: &str,
+    profile: Profile,
+    dict: Option<&Dictionary>,
+) -> Result<(Vec<u8>, Stats)> {
     let name = doc.get("name").unwrap_or(fallback_name);
     let desc = doc.get("description").unwrap_or("");
-    let mut b = Builder::new(name, desc);
+    let mut b = Builder::new(name, desc).profile(profile);
+    if let Some(d) = dict {
+        b = b.dictionary(d.clone());
+    }
     if let Some(v) = doc.get("version") {
         b = b.version(v);
     }

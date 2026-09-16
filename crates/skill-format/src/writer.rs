@@ -1,16 +1,31 @@
 use std::collections::{BTreeSet, HashMap};
 
+use crate::codec;
 use crate::error::{Error, Result};
 use crate::graph::{Abi, EdgeKind, Kind, NONE32, Tier, TrustClass, node_flags};
 use crate::header::{HEADER_LEN, MAGIC, VERSION_MAJOR, VERSION_MINOR};
 use crate::manifest::{
-    DIR_ENTRY_LEN, MANIFEST_HDR_LEN, NODE_LEN, SECT_CAPS, SECT_EDGES, SECT_HASHES, SECT_NODES,
-    SECT_SEGMENTS, SECT_STRINGS,
+    DIR_ENTRY_LEN, MANIFEST_HDR_LEN, NODE_LEN, SECT_CAPS, SECT_DICTREF, SECT_EDGES, SECT_HASHES,
+    SECT_NODES, SECT_REGIONS, SECT_SEGMENTS, SECT_STRINGS, SECT_ZSTD, manifest_flags,
 };
 use crate::subtree_hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeId(usize);
+
+/// What the writer is allowed to compress.
+///
+/// `Mapped` keeps every table readable in place, which is what "map, don't parse" was for, and
+/// compresses only the payload regions -- the 68% of a container that a router never reads.
+/// `Compact` also compresses the tables, trading zero-copy graph access for size. The choice is
+/// the publisher's and is recorded in the file, so a reader never has to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Profile {
+    None,
+    #[default]
+    Mapped,
+    Compact,
+}
 
 /// A capability a segment declares and the loader enforces. Kinds mirror `SPEC.md` §4.6.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +89,8 @@ pub struct Builder {
     version: Option<String>,
     license: Option<String>,
     nodes: Vec<BuildNode>,
+    profile: Profile,
+    dict: Option<crate::Dictionary>,
 }
 
 impl Builder {
@@ -85,7 +102,23 @@ impl Builder {
             version: None,
             license: None,
             nodes: Vec::new(),
+            profile: Profile::default(),
+            dict: None,
         }
+    }
+
+    #[must_use]
+    pub fn profile(mut self, p: Profile) -> Self {
+        self.profile = p;
+        self
+    }
+
+    /// A shared zstd dictionary. Readers must supply the same bytes; the file records its
+    /// BLAKE3 so a mismatch is refused rather than silently decoded into nonsense.
+    #[must_use]
+    pub fn dictionary(mut self, dict: crate::Dictionary) -> Self {
+        self.dict = Some(dict);
+        self
     }
 
     #[must_use]
@@ -270,8 +303,19 @@ impl Builder {
 
         let subtrees = self.hash_tree(&order);
         let mut hash_tbl: Vec<[u8; 32]> = Vec::new();
-        let mut hash_idx = vec![0u32; self.nodes.len()];
-        for &old in &order {
+        let mut hash_idx = vec![NONE32; self.nodes.len()];
+        for (rank_of, &old) in order.iter().enumerate() {
+            // A Merkle tree does not store its interior nodes. A commitment is kept only where
+            // something can be verified on its own: the root, every segment, and every point
+            // where the disclosure tier steps up -- exactly the set of nodes a loader can fetch
+            // without having already fetched more.
+            let n = &self.nodes[old];
+            let boundary = rank_of == 0
+                || n.kind == Kind::Segment
+                || n.parent.is_some_and(|p| n.tier > self.nodes[p].tier);
+            if !boundary {
+                continue;
+            }
             let h = subtrees[old];
             let at = hash_tbl.iter().position(|x| *x == h).unwrap_or_else(|| {
                 hash_tbl.push(h);
@@ -407,14 +451,75 @@ impl Builder {
             sections.push((SECT_CAPS, caps_sec, cap_count));
         }
 
+        let dict = self.dict.as_ref();
+        let compress_tables = self.profile == Profile::Compact;
+        let compress_regions = self.profile != Profile::None;
+
+        if let Some(d) = dict {
+            sections.push((SECT_DICTREF, d.digest().to_vec(), 1));
+        }
+
+        let mut hot_flag = 0u16;
+        let mut cold_flag = 0u16;
+        let hot_orig = u32::try_from(hot.len()).unwrap_or(0);
+        let cold_orig = u32::try_from(cold.len()).unwrap_or(0);
+        if compress_regions {
+            // Only keep the compressed form when it actually wins. On a near-empty region zstd
+            // frames cost more than they save, and a format that stores the larger of two
+            // encodings has chosen ceremony over bytes.
+            if let Ok(z) = codec::compress(&hot, dict)
+                && z.len() < hot.len()
+            {
+                hot = z;
+                hot_flag = manifest_flags::HOT_ZSTD;
+            }
+            if let Ok(z) = codec::compress(&cold, dict)
+                && z.len() < cold.len()
+            {
+                cold = z;
+                cold_flag = manifest_flags::COLD_ZSTD;
+            }
+        }
+        if hot_flag | cold_flag != 0 {
+            let mut rh = Vec::with_capacity(64);
+            rh.extend_from_slice(blake3::hash(&hot).as_bytes());
+            rh.extend_from_slice(blake3::hash(&cold).as_bytes());
+            sections.push((SECT_REGIONS, rh, 2));
+        }
+
+        // (id, stored bytes, count, orig_len, flags)
+        let sections: Vec<(u16, Vec<u8>, u32, u32, u16)> = sections
+            .into_iter()
+            .map(|(id, data, count)| {
+                let orig = u32::try_from(data.len()).unwrap_or(0);
+                let compressible = compress_tables
+                    && matches!(
+                        id,
+                        SECT_STRINGS
+                            | SECT_NODES
+                            | SECT_HASHES
+                            | SECT_EDGES
+                            | SECT_SEGMENTS
+                            | SECT_CAPS
+                    );
+                if compressible
+                    && let Ok(z) = codec::compress(&data, dict)
+                    && z.len() < data.len()
+                {
+                    return (id, z, count, orig, SECT_ZSTD);
+                }
+                (id, data, count, orig, 0)
+            })
+            .collect();
+
         let dir_len = DIR_ENTRY_LEN * sections.len();
         let mut body: Vec<u8> = Vec::new();
         let mut dir: Vec<u8> = Vec::new();
-        for (id, data, count) in &sections {
+        for (id, data, count, orig, flags) in &sections {
             let off = u32::try_from(MANIFEST_HDR_LEN + dir_len + body.len())
                 .map_err(|_| Error::OffsetOverflow { what: "section" })?;
             dir.extend_from_slice(&id.to_le_bytes());
-            dir.extend_from_slice(&0u16.to_le_bytes());
+            dir.extend_from_slice(&flags.to_le_bytes());
             dir.extend_from_slice(&off.to_le_bytes());
             dir.extend_from_slice(
                 &u32::try_from(data.len())
@@ -422,6 +527,8 @@ impl Builder {
                     .to_le_bytes(),
             );
             dir.extend_from_slice(&count.to_le_bytes());
+            dir.extend_from_slice(&orig.to_le_bytes());
+            dir.extend_from_slice(&0u32.to_le_bytes());
             body.extend_from_slice(data);
             while !body.len().is_multiple_of(8) {
                 body.push(0);
@@ -431,19 +538,17 @@ impl Builder {
         let manifest_off = u32::try_from(HEADER_LEN).expect("const");
         let manifest_len = u32::try_from(MANIFEST_HDR_LEN + dir_len + body.len())
             .map_err(|_| Error::OffsetOverflow { what: "manifest" })?;
-        while !hot.len().is_multiple_of(8) {
-            hot.push(0);
-        }
-        while !cold.len().is_multiple_of(8) {
-            cold.push(0);
-        }
         let hot_off = manifest_off + manifest_len;
         let cold_off = hot_off + u32::try_from(hot.len()).unwrap_or(0);
         let file_len = cold_off + u32::try_from(cold.len()).unwrap_or(0);
 
         let mut mhdr: Vec<u8> = Vec::with_capacity(MANIFEST_HDR_LEN);
         mhdr.extend_from_slice(&u16::try_from(sections.len()).unwrap_or(0).to_le_bytes());
-        mhdr.extend_from_slice(&0u16.to_le_bytes());
+        let mut mflags = hot_flag | cold_flag;
+        if dict.is_some() {
+            mflags |= manifest_flags::USES_DICT;
+        }
+        mhdr.extend_from_slice(&mflags.to_le_bytes());
         mhdr.extend_from_slice(&sidx(&self.name).to_le_bytes());
         mhdr.extend_from_slice(&sidx(&self.desc).to_le_bytes());
         mhdr.extend_from_slice(&self.version.as_deref().map_or(NONE32, &sidx).to_le_bytes());
@@ -453,7 +558,8 @@ impl Builder {
         mhdr.extend_from_slice(&u32::try_from(hot.len()).unwrap_or(0).to_le_bytes());
         mhdr.extend_from_slice(&cold_off.to_le_bytes());
         mhdr.extend_from_slice(&u32::try_from(cold.len()).unwrap_or(0).to_le_bytes());
-        mhdr.extend_from_slice(&[0u8; 8]);
+        mhdr.extend_from_slice(&hot_orig.to_le_bytes());
+        mhdr.extend_from_slice(&cold_orig.to_le_bytes());
         debug_assert_eq!(mhdr.len(), MANIFEST_HDR_LEN);
 
         let mut manifest = mhdr;

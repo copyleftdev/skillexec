@@ -38,10 +38,9 @@ under a body section gets promoted to its parent's tier, because tier must be mo
 0.6 clamps per skill: authors nest "when to use" under "overview" routinely. The clamp is the
 compiler resolving a real ambiguity, not an error.
 
-**+29.3% size, uncompressed.** This is the honest number and it is not a win on its own. The
-container carries fixed-width tables and per-node BLAKE3 commitments that Markdown does not, and
-neither zstd nor the shared corpus dictionary described in `SPEC.md` §6 is implemented yet. The
-size argument is unproven until they are.
+**Size.** Superseded — see *Compression* below. The uncompressed container is 23% larger than
+its source; the compressed one is 54% smaller; and it is still larger than compressed Markdown.
+All three of those are true at once and the section below gives each its due.
 
 **99.85% byte-exact round-trip.** The 13 files that are not byte-exact differ only in trailing
 whitespace. Getting here found four parser defects, each caught by the corpus and by nothing
@@ -53,8 +52,9 @@ multiple spaces after the hashes.
 
 `SPEC.md` §4.1 hoists `name` and `description` to fixed manifest offsets so routing "reads a
 fixed offset and never walks the graph". Measured, the header-plus-manifest span averages
-**2,725 bytes per skill** — because those two fields are *indices* into a sorted string heap, and
-sorting scatters them anywhere in the manifest. Reading them touches more pages than it should.
+**2,330 bytes per skill** in `Mapped` and **1,256** in `Compact` — because those two fields are
+*indices* into a sorted string heap, and sorting scatters them anywhere in the manifest. Reading
+them touches more pages than it should.
 
 The fix is a contiguous routing block placed immediately after the signature block, with `name`
 and `description` removed from the heap entirely so the bytes still have exactly one encoding.
@@ -159,3 +159,81 @@ segment is authorized and there is nothing behind the door yet. `wasm32-wasip2` 
 not executed either — ABI `6` (`wasm32-core`) is what runs today. The gate is real; the world
 behind it is a stub, and pretending otherwise would be the kind of claim this project exists to
 avoid making.
+
+
+## Compression
+
+Same 8,776 files. Every row is measured, not projected.
+
+| Representation | Total | vs source | Read one description without decoding the body? |
+|---|---|---|---|
+| Markdown source | 64.9 MB | — | yes |
+| Container, `None` | 79.8 MB | +23.0% | yes |
+| Container, `Mapped` | 44.4 MB | −31.6% | yes |
+| Container, `Compact` | 35.9 MB | −44.6% | yes |
+| Container, `Mapped` + dict | 39.0 MB | −39.9% | yes |
+| **Container, `Compact` + dict** | **29.6 MB** | **−54.4%** | yes |
+| Markdown, per-file `zstd -19` | 26.5 MB | −59.2% | **no** |
+| Markdown, per-file `zstd -19` + dict | 20.3 MB | −68.7% | **no** |
+| Markdown, whole corpus as one stream | 13.4 MB | −79.4% | **no** |
+
+The dictionary is 110 KB, trained once and shared; it is referenced by BLAKE3, not embedded,
+because 110 KB inside each of 8,776 files would cost 940 MB to save 6 MB.
+
+### Reading the table honestly
+
+**The gap that was open is closed.** The container used to be *larger than its own source*
+(+29.3%, before commitments were pruned to boundaries). It is now 54% smaller. That was the
+claim `SPEC.md` §6 had no evidence for, and now it does.
+
+**Against compressed Markdown, the container still loses**, 29.6 MB against 20.3 MB — about
+1.46× the bytes. Anyone whose only goal is bytes on disk should gzip the Markdown and stop
+reading here. That is worth saying plainly rather than burying under a favourable subset of the
+table.
+
+**The last two rows are not the same product.** A zstd'd `SKILL.md` has to be decompressed in
+full before you can read its `description`, because frontmatter sits at the front of a stream
+that decodes from the start. The whole-corpus row is worse still: 13.4 MB only exists if you
+treat 8,776 skills as one stream, and no individual skill can be read out of it at all. The
+container answers "is this skill relevant" from a fixed offset with no decompression in
+`Mapped`, and by decoding one small string section in `Compact`.
+
+Where the 9.3 MB difference goes, for `Compact` + dict: 10.0 MB of manifest tables (the graph,
+the strings, the commitments) and 19.0 MB of compressed payload. The 19.0 MB is the Markdown;
+the 10.0 MB is everything Markdown does not have — a typed graph, per-boundary BLAKE3
+commitments, capability records, and a routing plane.
+
+### What made the difference
+
+Three changes, in order of how much they moved:
+
+1. **Compress regions, not nodes.** A median skill is 5.5 KB across 21 nodes — 260 bytes each —
+   and zstd on 260 bytes usually *grows* it. Compressing HOT and COLD once each took the payload
+   from 61.1 MB to 24.9 MB. The earlier design in `SPEC.md` §6 said "per node/segment" and would
+   have made the file bigger.
+2. **Store commitments only at boundaries.** A hash per node cost 6.5 MB and bought nothing a
+   Merkle tree does not already imply. Keeping them for the root, segments and tier step-ups cut
+   the manifest from 23.0 MB to 18.2 MB before compression (`SPEC.md` §11.2).
+3. **A shared dictionary.** 35.9 → 29.6 MB in `Compact`. Small files are where a dictionary
+   earns its keep, and at a 5.5 KB median every file here is a small file.
+
+### A hypothesis that did not survive being measured
+
+`skillc dict` trains on the COLD regions of compiled containers rather than on the Markdown,
+on the reasoning that a dictionary should learn the bytes it will actually be asked to help
+with. Measured, that dictionary produces **29.9 MB** against the Markdown-trained one's
+**29.6 MB** — very slightly worse, and inside the noise of dictionary training.
+
+The reasoning was wrong about this corpus for a mundane reason: a skill's COLD region *is*
+mostly its Markdown prose, and frontmatter — which sounded like Markdown framing the container
+had stripped away — is itself a payload node. There was never much for the two dictionaries to
+disagree about. The training path is kept because it is the right default for a corpus whose
+payloads are not prose; it is not kept because it helped here.
+
+### One performance defect worth recording
+
+The first dictionary implementation called `Compressor::with_dictionary` per region per file,
+which re-digests the dictionary every time — work proportional to the *dictionary*, paid
+per *region*. Compiling the corpus went from ~1 s to minutes, and the cause was invisible in a
+unit test because a single-file test digests it once either way. `codec::Dictionary` now
+prepares the encoder and decoder forms once.

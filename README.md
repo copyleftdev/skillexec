@@ -16,7 +16,8 @@ verified graph with executable segments.
 ./scripts/gate.sh                    # fmt, clippy -D warnings, tests, 5s fuzz, spec agreement
 ./scripts/fuzz.sh 600 4              # long fuzz, capped at one core and 2G under systemd
 cargo run --example dump_minimal     # the spec's worked example, regenerated
-cargo run --release --bin skillc -- corpus <list-of-SKILL.md-paths>
+cargo run --release --bin skillc -- dict <list> corpus.dict
+cargo run --release --bin skillc -- corpus <list> --profile compact --dict corpus.dict
 ./specs/check.sh                     # 13 TLC runs, 6 of them canaries, ~90s
 ```
 

@@ -45,6 +45,9 @@ pub(crate) fn graph(m: &Manifest<'_>) -> Result<Vec<Node>> {
         }
     }
 
+    if nodes[0].hash_idx == NONE32 {
+        return Err(Error::RootHasNoCommitment);
+    }
     check_strings_and_hashes(m, &nodes)?;
     check_edges(m, &nodes)?;
     check_payload_ranges(m, &nodes)?;
@@ -88,7 +91,7 @@ fn check_strings_and_hashes(m: &Manifest<'_>, nodes: &[Node]) -> Result<()> {
         if node.name_idx != NONE32 && node.name_idx >= strs {
             return Err(Error::StringIndexOutOfRange(node.name_idx));
         }
-        if node.hash_idx >= hashes {
+        if node.hash_idx != NONE32 && node.hash_idx >= hashes {
             return Err(Error::HashIndexOutOfRange(node.hash_idx));
         }
     }
@@ -227,7 +230,7 @@ fn check_payload_ranges(m: &Manifest<'_>, nodes: &[Node]) -> Result<()> {
             continue;
         }
         let cold = node.flags & node_flags::PAYLOAD_COLD != 0;
-        let (_, region_len) = if cold { m.cold } else { m.hot };
+        let region_len = if cold { m.cold.2 } else { m.hot.2 };
         let end = node
             .payload_off
             .checked_add(node.payload_len)
