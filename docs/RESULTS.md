@@ -288,3 +288,75 @@ So the summary is a trade, not a win: **1.5× to 2× the bytes on disk, 7× to 6
 routing decision**, plus a signed graph, per-boundary commitments and capability records the
 Markdown does not carry at all. Whether that is worth it depends entirely on whether anything
 ever routes over the corpus. For an archive nobody queries, gzip the Markdown.
+
+
+## Held-out corpus: 128,292 skills from GitHub
+
+Everything above was measured on the corpus the design was derived from. This section is the
+same toolchain pointed at skills it had never seen.
+
+**How it was assembled.** 2,000 candidate repos found by GitHub topic search, name search and
+paced code search; 236 shallow-cloned; every `SKILL.md` collected, deduplicated by content, and
+then **every file whose content hash also appears in the original corpus removed** — 2,217 of
+them. Without that last step "held out" would have meant "partly the training set", and every
+rate here would be quietly inflated.
+
+Result: **128,292 unique skills, 879.1 MB, 14.6× the corpus the model came from.**
+
+### The format holds
+
+```
+compiled          128,292 (100.00%)
+verified          128,292 (100.00%)
+round-trip exact  126,900  (98.91%)
+round-trip norm   128,292 (100.00%)
+segments lifted   289,899
+```
+
+Zero compile failures, zero verification failures, zero normalised round-trip failures across
+879 MB of unvetted third-party Markdown, in 13.6 seconds. The 1,392 files that are not
+byte-exact differ only in trailing whitespace.
+
+### The classifier does not
+
+`GRAPH.md` §1 has the table: **40.6% on the fitted corpus, 26.1% held out.** That gap is the
+honest cost of deriving a vocabulary from one machine's skills, and the tail is multilingual, so
+it is a ceiling rather than a backlog.
+
+It is also the strongest evidence for the design's central separation. Three quarters of headings
+on real-world skills are unrecognised, and nothing breaks, because **role never drives dispatch**.
+Had the taxonomy been load-bearing, this corpus would have broken the format.
+
+### Content addressing improves with scale
+
+| | Payload | CAS saving | of which blobs < 64 B |
+|---|---|---|---|
+| Corpus A — 8,776 skills | 61.1 MB | 22.2% | 2.0% |
+| Corpus B — 128,292 skills | 828.5 MB | **31.5%** | 1.6% |
+
+2,976,365 payload nodes collapse to 1,437,999 distinct blobs. The largest savings are whole
+sections recurring across unrelated repositories — 1,316 B × 2,693 copies, 3,054 B × 430 — not
+whitespace. Corpus-wide content addressing is worth more the larger the corpus gets, which is the
+opposite of how the per-file measurements made it look.
+
+### Two defects that only scale could find
+
+**Frontmatter delimiters were reconstructed, not stored.** The corpus supplied all three ways to
+guess wrong: a file opening with an empty `---\n---\n` block before the real one, a file that is
+*only* frontmatter, and one with a stray `---` further down. Storing the block verbatim took
+round-trip from 128,289 to 128,292 of 128,292. This is the third time the same lesson has come
+back in this project — closing fence lines, heading whitespace, now frontmatter. **Store, do not
+derive.**
+
+**`skillc roles` was quadratic.** It scanned its list of distinct headings once per heading.
+At 8,776 files that is invisible. At 128,292 files with 452,057 distinct heading texts it ran for
+twenty minutes without producing a number. A `HashMap` took the same run to **6 seconds**. The
+tool had to be pointed at a corpus an order of magnitude past its author's own before its
+complexity showed up at all — which is the argument for dogfooding at a scale you do not control.
+
+### One operational mistake worth recording
+
+The first clone run staged repositories in the session scratchpad, which lives under `/tmp` —
+**tmpfs on this machine**. Fourteen gigabytes of git repositories went into RAM before anyone
+looked. The corpus now goes to real disk, and `clone.sh` checks a disk budget between clones.
+A scratch directory is not scratch space if it is backed by memory.

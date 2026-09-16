@@ -18,13 +18,18 @@ verified graph with executable segments.
 ./scripts/gate.sh                    # fmt, clippy -D warnings, tests, 5s fuzz, spec agreement
 ./scripts/fuzz.sh 600 4              # long fuzz, capped at one core and 2G under systemd
 cargo run --example dump_minimal     # the spec's worked example, regenerated
-cargo run --release --bin skillc -- dict <list> corpus.dict
+cargo run --release --bin skillc -- dict   <list> corpus.dict
 cargo run --release --bin skillc -- corpus <list> --profile compact --dict corpus.dict
+cargo run --release --bin skillc -- roles  <list>   # does the taxonomy generalise?
+cargo run --release --bin skillc -- cas    <list>   # corpus-wide dedup
+cargo run --release --bin skillc -- route  <list>   # routing cost vs zstd'd Markdown
 ./specs/check.sh                     # 13 TLC runs, 6 of them canaries, ~90s
 ```
 
-All 8,776 `SKILL.md` files on this workstation compile, verify, and render back — 99.85%
-byte-exact, 100% modulo trailing whitespace. Compiled and compressed they are **51% smaller than
+**128,292 held-out skills from 236 GitHub repositories** compile, verify and render back with
+zero failures, alongside the 8,776 local ones the design came from. The heading taxonomy is the
+part that does *not* generalise — 40.6% fitted, 26.1% held out — which is the measurement that
+justifies keeping role out of the dispatch path entirely. Compiled and compressed they are **51% smaller than
 their source**, and route **160× faster** than the same skills stored as compressed Markdown — at
 1.6× the bytes. 46M fuzz inputs, zero panics. TLC proves the validator's single forward
 pass equivalent to the semantic tree invariants over every five-node graph, and found two ways

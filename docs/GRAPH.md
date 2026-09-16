@@ -40,17 +40,29 @@ structure is already present and Markdown is a lossy flattening of it.
 
 ### How strong that evidence actually is
 
-The counts above are matches, not a proportion, and an earlier draft of this section presented
-them as though they were the whole story. Measured against the denominator
-(`skillc roles`), across **130,528 headings in 8,776 skills**, the classifier recognises
-**40.3%**. The other 59.7% are a very long tail: no unclassified heading text accounts for more
-than 0.6% of the total.
+The counts above are matches, not a proportion, and an earlier draft presented them as though
+they were the whole story. Measured against the denominator, on two corpora — the one the rules
+were fitted to, and a held-out one 14× larger:
 
-So the honest claim is weaker than "skills converge". A core vocabulary exists and covers about
-two fifths of all headings; the rest is genuinely idiosyncratic. The model survives that because
-**role never drives dispatch** (§2) — an unrecognised heading becomes plain `Prose` and every
-structural property still holds. A taxonomy that had to be exhaustive would have been the wrong
-design; this one only has to be useful.
+| | Headings | Classified |
+|---|---|---|
+| Corpus A — 8,776 skills, rules fitted on it | 130,528 | **40.6%** |
+| Corpus B — 128,292 skills from 236 GitHub repos, held out | 1,737,846 | **26.1%** |
+
+Corpus B excludes, by content hash, every file that also appears in A. The 14-point drop is the
+overfitting, measured rather than assumed.
+
+Two things make 26% a ceiling rather than a to-do list. The tail is enormous — 452,057 *distinct*
+unclassified heading texts — and it is **multilingual**: `arbeitsweg` (16,024), `prüfprogramm`,
+`normenanker`, `ausgabe` all appear in the thousands. An English keyword table cannot reach them,
+and 3.8% of headings have no alphanumeric content at all (emoji or symbols).
+
+So the honest claim is much weaker than "skills converge". A recognisable core vocabulary exists
+and covers roughly a quarter of headings on unseen skills; the rest is idiosyncratic or not in
+English. The model survives that only because **role never drives dispatch** (§2) — an
+unrecognised heading becomes plain `Prose` and every structural property still holds. That is the
+number that justifies the design decision: a taxonomy required to be exhaustive would have failed
+on three quarters of the real world.
 
 `SKILL.md` is not the skill. It is a **linearization** of the skill. `.skill` stores the graph.
 
