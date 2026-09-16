@@ -1,0 +1,57 @@
+# Labelled queries for tuning skill search.  query <TAB> acceptable skill names, comma separated
+#
+# Written in the phrasing someone would actually type, deliberately NOT paraphrased from the
+# skill descriptions. Copying description wording would hand the lexical scorer the answer and
+# make any weight above zero look worse than it is.
+#
+# Several targets are listed where more than one skill is a defensible answer; a hit on any of
+# them counts. Duplicate skill names in the library are fine — matching is by name.
+my interface feels too loud and busy	quieter
+the wording in my error messages confuses people	clarify
+this page is all grey and lifeless	colorize
+the text sizes look random across the page	typeset
+the spacing and alignment are off everywhere	layout,polish
+there is too much going on, strip it back	distill
+make it feel alive when you click things	animate,delight
+it should work on a phone too	adapt
+i want something that really shows off	overdrive
+how much of the company do i still own after this round	captable
+when do we run out of money	runway
+is our customer acquisition payback any good	unit-economics
+someone is going to poke holes in my numbers before we close	diligence
+how much should we raise and at what price	raise
+find bugs by throwing random inputs at my code	hughes-property-based-testing
+write the test before you write the code	beck-test-driven-development
+what could go wrong with this ticket	risk-based-testing
+is this user story ready for a developer to pick up	story-testability
+break things on purpose to see if we survive	netflix-chaos-engineering,gremlin-enterprise-chaos
+my p99 number looks too good to be true	tene-latency-measurement
+the queries are slow and the database is struggling	pavlo-database-performance
+design an http api other teams will call	fielding-rest
+keep an immutable log of everything that ever happened	young-event-sourcing
+prove a distributed protocol is actually correct	lamport-distributed-systems,lamport-formal-distributed
+we need error budgets and on call that is not miserable	google-sre
+fight with the rust borrow checker	matsakis-ownership-mastery
+write a lock free data structure	bos-concurrency-rust
+turn this struct into json in rust	tolnay-rust-ecosystem
+build an async network server in rust	lerche-async-runtime
+make my python less clumsy	hettinger-idiomatic-python,vanrossum-pythonic-style,ramalho-fluent-python
+build a command line tool people enjoy using	hashimoto-cli-ux
+check a github organisation for security problems	sigma-audit
+who has this developer worked with before	kraken
+is this account run by a person or a bot	op-recon
+look inside a file i do not trust	scry
+map what attackers do to what we can detect	mitre-attack-framework
+write detection rules for our siem	roth-detection-engineering
+add a new slash command	command-development
+i want to make a new skill	skill-development,skill-creator
+run something automatically before every commit	hook-development
+let claude call my internal api	build-mcp-server,mcp-integration
+is my claude md file any good	claude-md-improver
+review this pull request for me	code-review,claude-security
+trace a request through the zuub pipeline	ztel
+solve a hard competition maths problem	math-olympiad
+plan the screens before i write any code	shape
+go through this design like a critic would	critique
+the page takes forever to load	optimize
+check it works for screen readers	audit

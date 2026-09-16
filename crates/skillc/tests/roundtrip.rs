@@ -117,3 +117,24 @@ fn frontmatter_is_stored_verbatim_not_reconstructed() {
 fn an_unterminated_frontmatter_block_is_not_frontmatter() {
     exact("---\nname: x\nno closing delimiter\n");
 }
+
+#[test]
+fn folded_block_scalars_are_read_not_taken_literally() {
+    // `description: >-` with indented continuation lines is common in real skills. Reading the
+    // marker as the value left 25 of a 192-skill library with no description, and therefore no
+    // routing signal at all.
+    let src = "---\nname: s\ndescription: >-\n  First line of the description\n  and its continuation.\n---\n\nBody.\n";
+    let doc = md::parse(src);
+    assert_eq!(
+        doc.get("description"),
+        Some("First line of the description and its continuation.")
+    );
+    exact(src);
+}
+
+#[test]
+fn literal_block_scalars_keep_their_newlines() {
+    let src = "---\nname: s\ndescription: |\n  one\n  two\n---\n\nBody.\n";
+    assert_eq!(md::parse(src).get("description"), Some("one\ntwo"));
+    exact(src);
+}

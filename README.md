@@ -16,6 +16,7 @@ verified graph with executable segments.
   routing-plane search, lazy verified loading, segment capability disclosure
 - `crates/skill-embed` — sentence embeddings for routing planes (ONNX MiniLM, 384 dims)
 - `crates/corpusctl` — corpus assembly: supervised clones, pruning, BLAKE3 dedup, experiment runs
+- `eval/queries.tsv` — 49 labelled queries; `skill-eval` sweeps the ranking weight against them
 - `specs/` — TLA+ models of the graph invariants, with canaries that must fail
 
 ```sh

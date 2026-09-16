@@ -466,6 +466,51 @@ what after a funding round"* returns `captable`, `raise`, `diligence`.
 Both signals are reported on every hit. A search that cannot be asked why it ranked something is
 a search you have to take on faith.
 
+### Tuning the blend, and what 49 queries can settle
+
+The weight was 0.6 because 0.6 felt right, which is not a reason. `eval/queries.tsv` holds 49
+labelled queries — written in the phrasing someone would type, deliberately *not* paraphrased
+from the descriptions, since copying description wording hands the lexical scorer the answer.
+`skill-eval` sweeps the weight against them over the 192-skill working library.
+
+| weight | top-1 | top-3 | MRR | 95% CI on top-1 |
+|---|---|---|---|---|
+| 0.0 *(lexical only)* | 44.9% | 65.3% | 0.561 | [31.9%, 58.7%] |
+| 0.4 | 59.2% | 77.6% | 0.700 | [45.2%, 71.8%] |
+| 0.6 | 63.3% | 87.8% | 0.763 | [49.3%, 75.3%] |
+| **0.7** | **65.3%** | 87.8% | **0.774** | [51.3%, 77.1%] |
+| 0.8 | 63.3% | **89.8%** | 0.769 | [49.3%, 75.3%] |
+| 1.0 *(semantic only)* | 55.1% | 79.6% | 0.680 | [41.3%, 68.1%] |
+
+An inverted U, which is the good case: a flat sweep would have meant the knob never reached the
+decision. The blend beats both ends.
+
+What the sample can actually settle, by required sample size at 80% power and α = 0.05:
+
+| claim | observed | n needed | n had |
+|---|---|---|---|
+| blend beats pure lexical | 44.9% → 65.3% | **46** | 49 ✓ |
+| blend beats pure semantic | 55.1% → 65.3% | **181** | 49 ✗ |
+| 0.7 beats 0.6 | 63.3% → 65.3% | **4,504** | 49 ✗ |
+
+So exactly one of those is supported. The optimum is a **plateau across roughly 0.5–0.8**, not a
+point; 0.7 is taken from the middle because it leads on both top-1 and MRR, not because two
+points mean anything. Anyone reading 65.3% as "better than 63.3%" is reading noise.
+
+Settling "blend beats semantic alone" needs 181 queries, which is the obvious next piece of work
+if the ranking is ever load-bearing.
+
+### A defect the labelling found first
+
+Building the query set meant reading the catalogue, which showed **25 of 192 skills with no
+description at all** — every `stripe-*`, `connect-*`, and `hegel`. The frontmatter parser read
+`description: >-` literally instead of folding the block scalar beneath it, so those skills had
+no routing signal whatsoever: they could not be found by any query, lexical or semantic.
+
+Fixing it grew the routing plane from 50,607 to 76,246 bytes. Tuning a ranker on a corpus where
+13% of the entries were unroutable would have measured the wrong thing, and the only reason it
+surfaced is that labelling forces you to look at the data.
+
 ### What this costs, and what is not covered
 
 384 f32 dimensions is 1,536 bytes per skill: the working library went from 0.54 MB to 0.82 MB.

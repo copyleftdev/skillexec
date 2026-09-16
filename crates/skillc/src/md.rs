@@ -105,12 +105,53 @@ fn find_fm_end(after: &str) -> Option<usize> {
     None
 }
 
+/// Top-level `key: value` pairs, including YAML block scalars.
+///
+/// `description: >-` followed by indented lines is extremely common in real skills, and reading
+/// the marker as the value leaves those skills with no description at all — which means no
+/// routing signal, since the routing plane is exactly name and description. Twenty-five of one
+/// 192-skill library were unroutable for this reason before it was noticed.
+///
+/// Folded (`>`) joins continuation lines with spaces; literal (`|`) keeps the newlines. The
+/// chomping suffixes (`-`, `+`) only affect trailing newlines, which are trimmed here anyway.
 fn parse_frontmatter(raw: &str) -> Vec<(String, String)> {
-    raw.lines()
-        .filter(|l| !l.starts_with(char::is_whitespace) && !l.starts_with('#'))
-        .filter_map(|l| l.split_once(':'))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .collect()
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        if line.starts_with(char::is_whitespace) || line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let (key, marker) = (k.trim().to_string(), v.trim());
+
+        let folded = marker.starts_with('>');
+        if !folded && !marker.starts_with('|') {
+            out.push((key, marker.to_string()));
+            continue;
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+        while i < lines.len() {
+            let l = lines[i];
+            if !l.is_empty() && !l.starts_with(char::is_whitespace) {
+                break;
+            }
+            parts.push(l.trim().to_string());
+            i += 1;
+        }
+        let joined = if folded {
+            parts.join(" ")
+        } else {
+            parts.join("\n")
+        };
+        out.push((key, joined.trim().to_string()));
+    }
+    out
 }
 
 fn fence_marker(line: &str) -> Option<(usize, String)> {

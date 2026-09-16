@@ -11,9 +11,24 @@
 
 use std::path::{Path, PathBuf};
 
-/// How much of the ranking meaning contributes when both signals are available. Lexical matches
-/// are precise but literal; semantic ones generalise but drift. Neither deserves the whole vote.
-const SEMANTIC_WEIGHT: f32 = 0.6;
+/// How much of the ranking meaning contributes when both signals are available.
+///
+/// Measured, not chosen. Sweeping this against 49 labelled queries (`eval/queries.tsv`) over a
+/// 192-skill library gives an inverted U: 44.9% top-1 at pure lexical, 65.3% at 0.7, 55.1% at
+/// pure semantic. The blend beats both ends.
+///
+/// What the sample can and cannot settle, by required sample size at 80% power:
+///
+/// | claim | observed | n needed | n had |
+/// |---|---|---|---|
+/// | blend beats pure lexical | 44.9% → 65.3% | 46 | 49 |
+/// | blend beats pure semantic | 55.1% → 65.3% | 181 | 49 |
+/// | 0.7 beats 0.6 | 63.3% → 65.3% | 4,504 | 49 |
+///
+/// So the first claim is supported and the other two are not. The optimum is a plateau across
+/// roughly 0.5–0.8, not a point, and 0.7 is taken from the middle of it because it happens to
+/// lead on both top-1 and MRR — not because those few points mean anything.
+const SEMANTIC_WEIGHT: f32 = 0.7;
 use std::sync::Mutex;
 
 use skill_format::{Dictionary, Skill, TrustPolicy, embed};
@@ -139,6 +154,20 @@ impl Library {
     /// # Errors
     /// Fails if a container's routing block is malformed.
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<Hit>> {
+        self.search_weighted(query, limit, SEMANTIC_WEIGHT)
+    }
+
+    /// As [`Library::search`], with the blend fixed by the caller. Used to sweep the weight
+    /// against a labelled query set rather than choosing it by taste.
+    ///
+    /// # Errors
+    /// Fails if a container's routing block is malformed.
+    pub fn search_weighted(
+        &self,
+        query: &str,
+        limit: usize,
+        semantic_weight: f32,
+    ) -> anyhow::Result<Vec<Hit>> {
         let terms = terms_of(query);
         let catalogue = self.catalogue()?;
         // A query that reduces to no usable terms is no query. Listing is honest; inventing a
@@ -172,7 +201,7 @@ impl Library {
             }
             h.lexical = lexical[i];
             h.semantic = semantic[i];
-            scored.push((SEMANTIC_WEIGHT * sem + (1.0 - SEMANTIC_WEIGHT) * lex, h));
+            scored.push((semantic_weight * sem + (1.0 - semantic_weight) * lex, h));
         }
         scored.sort_by(|a, b| {
             b.0.partial_cmp(&a.0)
