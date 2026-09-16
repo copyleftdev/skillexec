@@ -13,7 +13,8 @@ meta = run.stderr.strip()
 ann = {
     0x00: "magic, v1.0, feature_flags=0",
     0x20: "manifest_root (BLAKE3 of the manifest bytes)",
-    0x40: "sect_count  flags=0 (uncompressed)  name_idx  desc_idx",
+    0x40: "routing block: name_len=4 desc_len=40, then the bytes",
+    0x70: "manifest: sect_count  flags=0 (uncompressed)",
 }
 out = []
 for line in dump.splitlines():

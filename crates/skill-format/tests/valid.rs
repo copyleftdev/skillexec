@@ -57,7 +57,12 @@ fn routing_plane_precedes_every_payload() {
         manifest_end <= s.manifest.hot.0,
         "payload regions must follow the manifest"
     );
-    let (name, desc) = Skill::routing_view(&bytes, None).unwrap();
+    // The routing block sits ahead of the manifest, not inside it.
+    assert!(
+        s.header.routing_off() < s.header.manifest_off as usize,
+        "routing must precede the manifest"
+    );
+    let (name, desc) = Skill::routing_view(&bytes).unwrap();
     assert_eq!(name, "rich");
     assert!(desc.starts_with("Exercises"));
 }
@@ -229,4 +234,44 @@ fn a_dictionary_file_is_refused_without_the_dictionary() {
     let s = Skill::open_with(&bytes, &TrustPolicy::permissive(), Some(&dict)).expect("opens");
     assert_eq!(s.payload(1).unwrap(), body.as_bytes());
     s.verify_all().unwrap();
+}
+
+#[test]
+fn routing_reads_only_the_front_of_the_file() {
+    use common::rich;
+    let bytes = rich();
+    let s = Skill::open(&bytes, &TrustPolicy::permissive()).unwrap();
+    let r = skill_format::routing::read(&bytes, s.header.routing_off()).unwrap();
+
+    // Everything routing needs lives before the manifest begins.
+    let touched = s.header.routing_off() + r.stored_len;
+    assert!(touched <= s.header.manifest_off as usize);
+    assert_eq!(r.name, "rich");
+    assert_eq!(Skill::routing_view(&bytes).unwrap().0, "rich");
+
+    // And the name is not duplicated in the string heap.
+    for i in 0..s.manifest.string_count() {
+        assert_ne!(
+            s.manifest.string(i).unwrap(),
+            "rich",
+            "name leaked into the heap"
+        );
+    }
+}
+
+#[test]
+fn a_tampered_routing_block_is_refused_at_open() {
+    use common::rich;
+    let mut bytes = rich();
+    let off = {
+        let s = Skill::open(&bytes, &TrustPolicy::permissive()).unwrap();
+        s.header.routing_off()
+    };
+    bytes[off + 4] ^= 0x20;
+    assert!(matches!(
+        Skill::open(&bytes, &TrustPolicy::permissive()),
+        Err(Error::RoutingHashMismatch)
+    ));
+    // The fast path still reads it, which is exactly why it is a hint and not a verdict.
+    assert!(Skill::routing_view(&bytes).is_ok());
 }

@@ -21,6 +21,7 @@ pub const SECT_EXTREFS: u16 = 7;
 pub const SECT_SRCSPANS: u16 = 8;
 pub const SECT_DICTREF: u16 = 9;
 pub const SECT_REGIONS: u16 = 10;
+pub const SECT_ROUTING: u16 = 11;
 
 const SECT_MUST_UNDERSTAND: u16 = 1 << 0;
 pub const SECT_ZSTD: u16 = 1 << 1;
@@ -60,8 +61,6 @@ impl Sect<'_> {
 
 #[derive(Debug)]
 pub struct Manifest<'a> {
-    pub name_idx: u32,
-    pub desc_idx: u32,
     pub version_idx: u32,
     pub license_idx: u32,
     pub node_count: u32,
@@ -70,6 +69,9 @@ pub struct Manifest<'a> {
     pub hot: (u32, u32, u32),
     pub cold: (u32, u32, u32),
     pub dict_hash: Option<[u8; 32]>,
+    /// `(stored_len, BLAKE3)` of the routing block. The block lives outside the manifest, so
+    /// without this it would be committed by nothing.
+    pub routing: Option<(u32, [u8; 32])>,
     pub region_hashes: Option<([u8; 32], [u8; 32])>,
     strings: Option<Sect<'a>>,
     nodes: Option<Sect<'a>>,
@@ -107,9 +109,9 @@ impl<'a> Manifest<'a> {
             });
         }
         let sect_count = u16_at(raw, 0x00)?;
+        // 0x04..0x0C held name_idx and desc_idx before the routing block replaced them.
+        all_zero(raw, 0x04, 8, "manifest reserved 0x04")?;
         let mut m = Self {
-            name_idx: u32_at(raw, 0x04)?,
-            desc_idx: u32_at(raw, 0x08)?,
             version_idx: u32_at(raw, 0x0C)?,
             license_idx: u32_at(raw, 0x10)?,
             node_count: u32_at(raw, 0x14)?,
@@ -117,6 +119,7 @@ impl<'a> Manifest<'a> {
             hot: (u32_at(raw, 0x18)?, u32_at(raw, 0x1C)?, u32_at(raw, 0x28)?),
             cold: (u32_at(raw, 0x20)?, u32_at(raw, 0x24)?, u32_at(raw, 0x2C)?),
             dict_hash: None,
+            routing: None,
             region_hashes: None,
             strings: None,
             nodes: None,
@@ -156,10 +159,6 @@ impl<'a> Manifest<'a> {
                 });
             }
 
-            if id == SECT_DICTREF {
-                m.dict_hash = Some(hash_at(raw, s_off as usize)?);
-                continue;
-            }
             if id == SECT_REGIONS {
                 m.region_hashes = Some((
                     hash_at(raw, s_off as usize)?,
@@ -168,6 +167,9 @@ impl<'a> Manifest<'a> {
                 continue;
             }
 
+            if m.absorb_sidecar(raw, id, s_off)? {
+                continue;
+            }
             let slot = match id {
                 SECT_STRINGS => &mut m.strings,
                 SECT_NODES => &mut m.nodes,
@@ -204,6 +206,21 @@ impl<'a> Manifest<'a> {
             return Err(Error::SectionCountMismatch { id: SECT_NODES });
         }
         Ok(m)
+    }
+
+    /// Sections that are a single fixed record rather than a table, and that the rest of the
+    /// parser reads as scalars. Returns whether `id` was one of them.
+    fn absorb_sidecar(&mut self, raw: &'a [u8], id: u16, off: u32) -> Result<bool> {
+        let at = off as usize;
+        match id {
+            SECT_DICTREF => self.dict_hash = Some(hash_at(raw, at)?),
+            SECT_ROUTING => self.routing = Some((u32_at(raw, at)?, hash_at(raw, at + 4)?)),
+            SECT_REGIONS => {
+                self.region_hashes = Some((hash_at(raw, at)?, hash_at(raw, at + 32)?));
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 
     fn check_fixed(id: u16, s: Option<&Sect<'_>>, unit: usize) -> Result<()> {

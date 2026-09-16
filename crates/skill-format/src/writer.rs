@@ -6,8 +6,9 @@ use crate::graph::{Abi, EdgeKind, Kind, NONE32, Tier, TrustClass, node_flags};
 use crate::header::{HEADER_LEN, MAGIC, VERSION_MAJOR, VERSION_MINOR};
 use crate::manifest::{
     DIR_ENTRY_LEN, MANIFEST_HDR_LEN, NODE_LEN, SECT_CAPS, SECT_DICTREF, SECT_EDGES, SECT_HASHES,
-    SECT_NODES, SECT_REGIONS, SECT_SEGMENTS, SECT_STRINGS, SECT_ZSTD, manifest_flags,
+    SECT_NODES, SECT_REGIONS, SECT_ROUTING, SECT_SEGMENTS, SECT_STRINGS, SECT_ZSTD, manifest_flags,
 };
+use crate::routing;
 use crate::subtree_hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,9 +253,9 @@ impl Builder {
             }
         }
 
+        // `name` and `description` are deliberately absent: they live in the routing block and
+        // nowhere else, so the file still has exactly one encoding of each.
         let mut strs: BTreeSet<&str> = BTreeSet::new();
-        strs.insert(&self.name);
-        strs.insert(&self.desc);
         for s in [&self.version, &self.license].into_iter().flatten() {
             strs.insert(s);
         }
@@ -459,6 +460,16 @@ impl Builder {
             sections.push((SECT_DICTREF, d.digest().to_vec(), 1));
         }
 
+        let routing_block = routing::encode(&self.name, &self.desc)?;
+        let mut routing_sec = Vec::with_capacity(36);
+        routing_sec.extend_from_slice(
+            &u32::try_from(routing_block.len())
+                .map_err(|_| Error::OffsetOverflow { what: "routing" })?
+                .to_le_bytes(),
+        );
+        routing_sec.extend_from_slice(blake3::hash(&routing_block).as_bytes());
+        sections.push((SECT_ROUTING, routing_sec, 1));
+
         let mut hot_flag = 0u16;
         let mut cold_flag = 0u16;
         let hot_orig = u32::try_from(hot.len()).unwrap_or(0);
@@ -535,7 +546,8 @@ impl Builder {
             }
         }
 
-        let manifest_off = u32::try_from(HEADER_LEN).expect("const");
+        let manifest_off = u32::try_from(HEADER_LEN + routing_block.len())
+            .map_err(|_| Error::OffsetOverflow { what: "manifest" })?;
         let manifest_len = u32::try_from(MANIFEST_HDR_LEN + dir_len + body.len())
             .map_err(|_| Error::OffsetOverflow { what: "manifest" })?;
         let hot_off = manifest_off + manifest_len;
@@ -549,8 +561,7 @@ impl Builder {
             mflags |= manifest_flags::USES_DICT;
         }
         mhdr.extend_from_slice(&mflags.to_le_bytes());
-        mhdr.extend_from_slice(&sidx(&self.name).to_le_bytes());
-        mhdr.extend_from_slice(&sidx(&self.desc).to_le_bytes());
+        mhdr.extend_from_slice(&[0u8; 8]);
         mhdr.extend_from_slice(&self.version.as_deref().map_or(NONE32, &sidx).to_le_bytes());
         mhdr.extend_from_slice(&self.license.as_deref().map_or(NONE32, &sidx).to_le_bytes());
         mhdr.extend_from_slice(&u32::try_from(order.len()).unwrap_or(0).to_le_bytes());
@@ -578,6 +589,7 @@ impl Builder {
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(blake3::hash(&manifest).as_bytes());
         debug_assert_eq!(out.len(), HEADER_LEN);
+        out.extend_from_slice(&routing_block);
         out.extend_from_slice(&manifest);
         out.extend_from_slice(&hot);
         out.extend_from_slice(&cold);

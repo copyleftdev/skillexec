@@ -77,11 +77,6 @@ fn on_root_path(nodes: &[Node], from: u32, target: u32) -> bool {
 fn check_strings_and_hashes(m: &Manifest<'_>, nodes: &[Node]) -> Result<()> {
     let strs = m.string_count();
     let hashes = m.hash_count();
-    for idx in [m.name_idx, m.desc_idx] {
-        if idx >= strs {
-            return Err(Error::StringIndexOutOfRange(idx));
-        }
-    }
     for idx in [m.version_idx, m.license_idx] {
         if idx != NONE32 && idx >= strs {
             return Err(Error::StringIndexOutOfRange(idx));

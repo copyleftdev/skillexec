@@ -11,6 +11,7 @@ pub mod graph;
 pub mod header;
 pub mod manifest;
 mod raw;
+pub mod routing;
 pub mod sig;
 mod validate;
 pub mod writer;
@@ -115,6 +116,13 @@ impl<'a> Skill<'a> {
         }
 
         let manifest = Manifest::parse(raw, dict)?;
+
+        let r = routing::read(bytes, header.routing_off())?;
+        let (want_len, want_hash) = manifest.routing.ok_or(Error::RoutingUncommitted)?;
+        let block = raw::bytes_at(bytes, header.routing_off(), r.stored_len)?;
+        if r.stored_len != want_len as usize || blake3::hash(block).as_bytes() != &want_hash {
+            return Err(Error::RoutingHashMismatch);
+        }
         if let Some(want) = manifest.dict_hash {
             let have = dict.ok_or(Error::MissingDictionary)?;
             if have.digest() != want {
@@ -187,34 +195,31 @@ impl<'a> Skill<'a> {
     }
 
     /// # Errors
-    /// Rejects a manifest whose name index does not resolve.
-    pub fn name(&self) -> Result<&str> {
-        self.manifest.string(self.manifest.name_idx)
+    /// Rejects a truncated or non-UTF-8 routing block.
+    pub fn name(&self) -> Result<&'a str> {
+        Ok(routing::read(self.bytes, self.header.routing_off())?.name)
     }
 
     /// # Errors
-    /// Rejects a manifest whose description index does not resolve.
-    pub fn description(&self) -> Result<&str> {
-        self.manifest.string(self.manifest.desc_idx)
+    /// Rejects a truncated or non-UTF-8 routing block.
+    pub fn description(&self) -> Result<&'a str> {
+        Ok(routing::read(self.bytes, self.header.routing_off())?.description)
     }
 
-    /// Reading the routing plane never touches a body. This is the whole point of the tier
-    /// split, and it is a property of the layout rather than of caller discipline.
+    /// Reads `name` and `description` and nothing else.
+    ///
+    /// Touches the 64-byte header and the routing block that follows the signatures -- a few
+    /// hundred bytes at the front of the file, typically one page. It does **not** verify them:
+    /// the commitment lives in the manifest, and reading the manifest is exactly the cost this
+    /// exists to avoid. Routing is a hint about what to open; [`Skill::open`] decides whether
+    /// the bytes are real, and checks this block against its commitment.
+    ///
     /// # Errors
-    /// Rejects a malformed header or manifest. Performs no signature check: callers that
-    /// need one open the file properly.
-    pub fn routing_view(bytes: &'a [u8], dict: Option<&'a Dictionary>) -> Result<(String, String)> {
+    /// Rejects a malformed header or a truncated or non-UTF-8 routing block.
+    pub fn routing_view(bytes: &'a [u8]) -> Result<(&'a str, &'a str)> {
         let header = Header::parse(bytes)?;
-        let raw = raw::bytes_at(
-            bytes,
-            header.manifest_off as usize,
-            header.manifest_len as usize,
-        )?;
-        let m = Manifest::parse(raw, dict)?;
-        Ok((
-            m.string(m.name_idx)?.to_owned(),
-            m.string(m.desc_idx)?.to_owned(),
-        ))
+        let r = routing::read(bytes, header.routing_off())?;
+        Ok((r.name, r.description))
     }
 
     #[must_use]

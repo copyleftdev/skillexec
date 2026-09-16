@@ -21,9 +21,10 @@ Reserved fields **MUST** be written zero and readers **MUST** reject non-zero.
 ```
 0x0000  Header             64 bytes, fixed, frozen across all v1.x
 0x0040  Signature block    sig_count × 112 bytes   (may be 0)
+        Routing block      name and description, contiguous (§3.1)
         Manifest           tables; digest committed in the header
         Payload HOT        tier-0 payloads
-        Payload COLD       tier-1/2 payloads, per-segment compressed
+        Payload COLD       tier-1/2 payloads, compressed per region
 ```
 
 ## 2. Header (64 bytes, offset 0)
@@ -59,6 +60,33 @@ section, every node names its subtree hash. Signing 64 bytes signs the file.
 not format. Multiple signatures are independent assertions over the same bytes — a publisher and
 a reviewer sign the same digest, no envelope nesting, no re-serialization.
 
+### 3.1 Routing block
+
+Immediately after the signature block, at an offset **derived from the header alone**:
+`64 + 112 × sig_count`.
+
+| Off | Size | Field |
+|---|---|---|
+| 0x00 | 2 | `name_len` |
+| 0x02 | 2 | `desc_len` |
+| 0x04 | `name_len` | name, UTF-8 |
+| … | `desc_len` | description, UTF-8 |
+| … | — | zero padding to a multiple of 8 |
+
+These two fields decide whether a skill is loaded at all. They used to be *indices* into the
+sorted string heap, and sorting scatters them: reading them meant reading the manifest, measured
+at 1,524 bytes per skill to retrieve about 200 (§10.8). They now live in one run of bytes at the
+front of the file, and **nowhere else** — keeping them out of the heap is what preserves one
+encoding per logical value.
+
+The offset is derived rather than stored on purpose. An offset the manifest owns would put the
+name behind the manifest, which is the cost this block exists to avoid.
+
+The block is committed by `SECT_ROUTING` (§4.2) and verified by `Skill::open`. `routing_view`
+deliberately does **not** verify it: the commitment is in the manifest, and reading the manifest
+is the cost being avoided. Routing is a hint about what to open; opening is what decides whether
+the bytes are real.
+
 ## 4. Manifest
 
 ### 4.1 Manifest header (48 bytes, at `manifest_off`)
@@ -67,8 +95,7 @@ a reviewer sign the same digest, no envelope nesting, no re-serialization.
 |---|---|---|
 | 0x00 | 2 | `sect_count` |
 | 0x02 | 2 | `flags` |
-| 0x04 | 4 | `name_idx` → string heap |
-| 0x08 | 4 | `desc_idx` → string heap |
+| 0x04 | 8 | `reserved` (zero) — held `name_idx` and `desc_idx` before §3.1 |
 | 0x0C | 4 | `version_idx` (`0xFFFFFFFF` = absent) |
 | 0x10 | 4 | `license_idx` (`0xFFFFFFFF` = absent) |
 | 0x14 | 4 | `node_count` |
@@ -81,9 +108,9 @@ a reviewer sign the same digest, no envelope nesting, no re-serialization.
 
 `flags` at 0x02: bit 0 `HOT_ZSTD`, bit 1 `COLD_ZSTD`, bit 2 `USES_DICT`.
 
-`name` and `desc` are manifest fields, not nodes, because the corpus says they are the only
-universal elements (9,008 / 9,035 of 9,212 files). Hoisting them means **routing reads a fixed
-offset and never walks the graph.**
+`name` and `description` are not manifest fields at all — see §3.1. The corpus says they are the
+only universal elements (9,008 / 9,035 of 9,212 files), which is exactly why they belong in front
+of the manifest rather than inside it.
 
 ### 4.2 Section directory (`sect_count` × 24 bytes)
 
@@ -109,6 +136,7 @@ offset and never walks the graph.**
 | 8 | SRCSPANS | 8 B, optional, round-trip only |
 | 9 | DICTREF | 32 B — BLAKE3 of the shared zstd dictionary this file requires |
 | 10 | REGIONS | 64 B — BLAKE3 of the **stored** HOT and COLD bytes |
+| 11 | ROUTING | 36 B — `len u32` then BLAKE3 of the routing block (§3.1) |
 
 Sections are 8-byte aligned. Absent optional sections are omitted, not zero-length.
 
@@ -258,36 +286,39 @@ which is stated there rather than argued away here.
 Emitted by the reference writer (`cargo run --example dump_minimal`, refreshed by
 `scripts/refresh-spec-dump.py`), so the spec's example and the implementation cannot drift.
 Built with `Profile::None`: a hexdump of a zstd frame teaches nothing about this format.
-390 bytes; `name="demo"`,
+446 bytes; `name="demo"`,
 `description="Use when demonstrating the skill format."`; a tier-0 `Prose` root with an empty
 payload and one tier-1 child carrying `"Do the thing.\n"`. `sig_count = 0`.
 
 ```
 00000000  8f 53 4b 4c 0d 0a 1a 0a  01 00 00 00 00 00 00 00   magic, v1.0, feature_flags=0
-00000010  86 01 00 00 40 00 00 00  38 01 00 00 00 00 00 00
-00000020  d7 88 62 59 b3 e7 18 ed  2d b1 0e 79 1b 97 12 30   manifest_root (BLAKE3 of the manifest bytes)
-00000030  f4 0b d7 3c d4 e2 fb 88  c1 92 ed 45 88 8e b1 3a
-00000040  03 00 00 00 01 00 00 00  00 00 00 00 ff ff ff ff   sect_count  flags=0 (uncompressed)  name_idx  desc_idx
-00000050  ff ff ff ff 02 00 00 00  78 01 00 00 00 00 00 00
-00000060  78 01 00 00 0e 00 00 00  00 00 00 00 0e 00 00 00
-00000070  01 00 00 00 78 00 00 00  3c 00 00 00 02 00 00 00
-00000080  3c 00 00 00 00 00 00 00  02 00 00 00 b8 00 00 00
-00000090  40 00 00 00 02 00 00 00  40 00 00 00 00 00 00 00
-000000a0  04 00 00 00 f8 00 00 00  40 00 00 00 02 00 00 00
-000000b0  40 00 00 00 00 00 00 00  02 00 00 00 00 00 00 00
-000000c0  28 00 00 00 2c 00 00 00  55 73 65 20 77 68 65 6e
-000000d0  20 64 65 6d 6f 6e 73 74  72 61 74 69 6e 67 20 74
-000000e0  68 65 20 73 6b 69 6c 6c  20 66 6f 72 6d 61 74 2e
-000000f0  64 65 6d 6f 00 00 00 00  02 00 00 00 01 00 00 00
-00000100  ff ff ff ff 00 00 00 00  00 00 00 00 00 00 00 00
-00000110  00 00 00 00 ff ff ff ff  02 01 02 01 01 00 00 00
-00000120  ff ff ff ff 00 00 00 00  00 00 00 00 0e 00 00 00
-00000130  01 00 00 00 00 00 00 00  0b 6a a1 83 70 03 20 af
-00000140  4e ee d9 5f de 5d b7 0e  53 cb 5a 31 51 7c fb 9d
-00000150  8c 49 18 00 35 31 5e 13  1f 5d d5 ad 20 f5 3a 75
-00000160  65 56 8d 05 46 b5 73 f9  59 86 90 26 94 a3 4a b4
-00000170  02 f1 fc 1a 6b b3 10 a4  44 6f 20 74 68 65 20 74
-00000180  68 69 6e 67 2e 0a
+00000010  be 01 00 00 70 00 00 00  40 01 00 00 00 00 00 00
+00000020  54 f7 ec 34 30 fa 42 cd  2e 1a de 8f 31 79 db 19   manifest_root (BLAKE3 of the manifest bytes)
+00000030  8a be 8a 81 90 75 3a c9  8e 85 fe 4c 53 90 5c 3e
+00000040  04 00 28 00 64 65 6d 6f  55 73 65 20 77 68 65 6e   routing block: name_len=4 desc_len=40, then the bytes
+00000050  20 64 65 6d 6f 6e 73 74  72 61 74 69 6e 67 20 74
+00000060  68 65 20 73 6b 69 6c 6c  20 66 6f 72 6d 61 74 2e
+00000070  04 00 00 00 00 00 00 00  00 00 00 00 ff ff ff ff   manifest: sect_count  flags=0 (uncompressed)
+00000080  ff ff ff ff 02 00 00 00  b0 01 00 00 00 00 00 00
+00000090  b0 01 00 00 0e 00 00 00  00 00 00 00 0e 00 00 00
+000000a0  01 00 00 00 90 00 00 00  08 00 00 00 00 00 00 00
+000000b0  08 00 00 00 00 00 00 00  02 00 00 00 98 00 00 00
+000000c0  40 00 00 00 02 00 00 00  40 00 00 00 00 00 00 00
+000000d0  04 00 00 00 d8 00 00 00  40 00 00 00 02 00 00 00
+000000e0  40 00 00 00 00 00 00 00  0b 00 00 00 18 01 00 00
+000000f0  24 00 00 00 01 00 00 00  24 00 00 00 00 00 00 00
+00000100  00 00 00 00 00 00 00 00  02 00 00 00 01 00 00 00
+00000110  ff ff ff ff 00 00 00 00  00 00 00 00 00 00 00 00
+00000120  00 00 00 00 ff ff ff ff  02 01 02 01 01 00 00 00
+00000130  ff ff ff ff 00 00 00 00  00 00 00 00 0e 00 00 00
+00000140  01 00 00 00 00 00 00 00  0b 6a a1 83 70 03 20 af
+00000150  4e ee d9 5f de 5d b7 0e  53 cb 5a 31 51 7c fb 9d
+00000160  8c 49 18 00 35 31 5e 13  1f 5d d5 ad 20 f5 3a 75
+00000170  65 56 8d 05 46 b5 73 f9  59 86 90 26 94 a3 4a b4
+00000180  02 f1 fc 1a 6b b3 10 a4  30 00 00 00 e7 d6 9e 6b
+00000190  76 94 51 76 77 48 f1 44  e5 47 97 fc 22 9d a5 66
+000001a0  6a 78 90 47 84 cc e1 7b  2a f0 41 82 00 00 00 00
+000001b0  44 6f 20 74 68 65 20 74  68 69 6e 67 2e 0a
 ```
 
 Note the string heap ordering: `"Use…"` (0x55) sorts before `"demo"` (0x64), so `name_idx = 1`
@@ -488,3 +519,24 @@ and `Error::UncommittedNonZero` still rejects them.
 A compressed region is covered instead by `SECT_REGIONS`, a BLAKE3 over the **stored** bytes,
 verified when the region is first decompressed. Without it a compressed region would be committed
 by nothing at all, which is §10.3 again in a new costume.
+
+
+### 10.8 Routing read the whole manifest to find two strings
+
+`SPEC.md` §4.1 hoisted `name` and `description` into the manifest header so that "routing reads
+a fixed offset and never walks the graph". The fields were there; the *bytes* were not. Both were
+`u32` indices into a string heap that is sorted for canonicality, and sorting puts them wherever
+they happen to fall. Reading them therefore meant reading the manifest.
+
+Measured across the corpus: **1,524 bytes touched per skill** to retrieve roughly 200, and in the
+`Compact` profile it was worse than that — the string heap is compressed there, so routing had to
+inflate a section before it could read a name. That showed up as 4,330 ns per routing decision
+against `Mapped`'s 453 ns, a 9.5× penalty for a profile whose only job was to be smaller.
+
+The fix is §3.1: a contiguous routing block at an offset derived from the header, with the two
+strings removed from the heap entirely so there is still exactly one encoding of each. The
+derivation matters as much as the block — an offset stored *in* the manifest would have put the
+name behind the manifest again.
+
+The lesson generalises past this format: hoisting a *reference* into a hot structure does not
+hoist the data. Only bytes are hot.

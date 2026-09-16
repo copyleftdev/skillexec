@@ -71,6 +71,17 @@ impl Header {
         })
     }
 
+    /// Where the routing block starts.
+    ///
+    /// Derived from the header alone, never stored: it sits immediately after the signature
+    /// block. That is the whole point -- a router that has to read the manifest to find the
+    /// name has not saved anything, and an offset the manifest owns would put the name behind
+    /// the manifest.
+    #[must_use]
+    pub fn routing_off(&self) -> usize {
+        HEADER_LEN + crate::sig::SIG_LEN * self.sig_count as usize
+    }
+
     /// The digest every signature is computed over. Signing 64 bytes signs the file, because
     /// those bytes name the manifest root and the manifest names everything else.
     #[must_use]

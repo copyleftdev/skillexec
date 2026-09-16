@@ -26,6 +26,7 @@ struct Corpus {
     src_bytes: u64,
     bin_bytes: u64,
     routing_bytes: u64,
+    manifest_span: u64,
     manifest_b: u64,
     nodes_b: u64,
     hashes_b: u64,
@@ -110,7 +111,7 @@ fn route_bench(list: &str, profile: Profile, dict: Option<&Dictionary>) {
     let t0 = std::time::Instant::now();
     let mut acc = 0usize;
     for c in &containers {
-        if let Ok((name, desc)) = Skill::routing_view(c, dict) {
+        if let Ok((name, desc)) = Skill::routing_view(c) {
             acc += name.len() + desc.len();
         }
     }
@@ -261,7 +262,12 @@ fn corpus(list: &str, limit: usize, profile: Profile, dict: Option<&Dictionary>)
             continue;
         }
         c.verified += 1;
-        c.routing_bytes += u64::from(s.header.manifest_off + s.header.manifest_len);
+        // What routing actually has to touch: the header plus the routing block, not the
+        // whole manifest.
+        if let Ok(r) = skill_format::routing::read(&bytes, s.header.routing_off()) {
+            c.routing_bytes += (s.header.routing_off() + r.stored_len) as u64;
+        }
+        c.manifest_span += u64::from(s.header.manifest_off + s.header.manifest_len);
         c.nodes_b += u64::try_from(s.nodes.len() * 32).unwrap_or(0);
         c.hashes_b += u64::from(s.manifest.hash_count()) * 32;
         c.edges_b += u64::from(s.manifest.edge_count()) * 8;
@@ -309,11 +315,12 @@ fn corpus(list: &str, limit: usize, profile: Profile, dict: Option<&Dictionary>)
         );
     }
     println!(
-        "routing plane    {:.1} MB of {:.1} MB bin ({:.1}% of it), {} B/skill avg",
-        c.routing_bytes as f64 / 1.048_576e6,
-        c.bin_bytes as f64 / 1.048_576e6,
-        c.routing_bytes as f64 * 100.0 / c.bin_bytes.max(1) as f64,
+        "routing touches  {} B/skill avg (header + routing block)",
         c.routing_bytes / u64::from(c.verified.max(1))
+    );
+    println!(
+        "manifest span    {} B/skill avg (what routing used to have to read)",
+        c.manifest_span / u64::from(c.verified.max(1))
     );
     println!(
         "size             {:.1} MB src -> {:.1} MB bin ({:+.1}%)",

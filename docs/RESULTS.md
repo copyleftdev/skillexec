@@ -48,17 +48,18 @@ else: unterminated fences at EOF, indented fences (which let `#` comments inside
 headings), closing-fence indentation that differs from the opening line's, and heading text with
 multiple spaces after the hashes.
 
-### Known issue: the routing plane is not as hot as claimed
+### Fixed: the routing plane is now actually hot
 
-`SPEC.md` §4.1 hoists `name` and `description` to fixed manifest offsets so routing "reads a
-fixed offset and never walks the graph". Measured, the header-plus-manifest span averages
-**2,330 bytes per skill** in `Mapped` and **1,256** in `Compact` — because those two fields are
-*indices* into a sorted string heap, and sorting scatters them anywhere in the manifest. Reading
-them touches more pages than it should.
+An earlier draft hoisted `name` and `description` into the manifest header and claimed routing
+therefore "reads a fixed offset and never walks the graph". The fields were there; the *bytes*
+were not. Both were `u32` indices into a string heap that is sorted for canonicality, and sorting
+puts them wherever they fall — so reading them meant reading the manifest, **1,524 bytes per
+skill** to retrieve about 200.
 
-The fix is a contiguous routing block placed immediately after the signature block, with `name`
-and `description` removed from the heap entirely so the bytes still have exactly one encoding.
-Not yet implemented.
+`SPEC.md` §3.1 replaces that with a contiguous routing block at an offset derived from the header
+alone, with the two strings removed from the heap entirely so there is still exactly one encoding
+of each. Routing now touches **331 bytes per skill**. The numbers below are measured after the
+fix; `SPEC.md` §10.8 records what it cost to get wrong.
 
 ## Fuzzing
 
@@ -210,6 +211,16 @@ the strings, the commitments) and 19.0 MB of compressed payload. The 19.0 MB is 
 the 10.0 MB is everything Markdown does not have — a typed graph, per-boundary BLAKE3
 commitments, capability records, and a routing plane.
 
+### What the routing block cost
+
+`SPEC.md` §3.1 is not free. `name` and `description` left the compressed string heap for an
+uncompressed block, which across the corpus is about **250 bytes per skill that used to
+compress**: `Compact` + dict went from 29.6 MB to 31.7 MB, up 7.1%.
+
+It bought routing going from 4,330 ns to 182 ns in that profile, and from 1,256 bytes touched to
+364. If nothing ever routes over the corpus, that is 2.1 MB spent on nothing; the block is a bet
+that something does, which is the same bet the whole format makes.
+
 ### What made the difference
 
 Three changes, in order of how much they moved:
@@ -257,14 +268,14 @@ from each. Same corpus, same dictionary, same process.
 
 | | Bytes | vs baseline | Routing | vs baseline |
 |---|---|---|---|---|
-| Container, `Mapped` + dict | 39.0 MB | 2.02× | **453 ns/skill** | **64.7× faster** |
-| Container, `Compact` + dict | 29.6 MB | 1.53× | 4,330 ns/skill | 6.7× faster |
-| Markdown, per-file zstd + same dict | 19.35 MB | 1.00× | 28,911 ns/skill | 1.00× |
+| Container, `Mapped` + dict | 39.5 MB | 2.04× | **176 ns/skill** | **165.7× faster** |
+| Container, `Compact` + dict | 31.7 MB | 1.64× | **182 ns/skill** | **159.5× faster** |
+| Markdown, per-file zstd + same dict | 19.35 MB | 1.00× | 29,033 ns/skill | 1.00× |
 
-The profiles are a real trade curve rather than a good option and a bad one. `Mapped` keeps the
-string heap readable in place, so routing is two string reads and no decoding at all. `Compact`
-compresses that heap too: 24% fewer bytes, and routing now has to inflate one small section per
-skill — still an order of magnitude cheaper than the Markdown path.
+Routing costs the same in both profiles now, because it reads the routing block (§3.1) and
+nothing else — not the string heap, compressed or otherwise. Before that block existed, `Compact`
+paid 4,330 ns against `Mapped`'s 453: it had to inflate a section to read a name, a 9.5× penalty
+on the profile whose only job was to be smaller. `Compact` is now simply the better default.
 
 The asymmetry against Markdown is structural, not an optimisation. Frontmatter sits at the front
 of a stream that decodes from the start, so reading one description out of a zstd'd `SKILL.md`
