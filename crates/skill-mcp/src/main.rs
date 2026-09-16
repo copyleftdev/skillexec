@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
 
     let lib = library::Library::open(&path, dict)
         .with_context(|| format!("opening skill library at {}", path.display()))?;
-    let n = lib.catalogue().map_or(0, |c| c.len());
+    let n = lib.catalogue().len();
     tracing::info!(
         containers = lib.container_count(),
         skills = n,

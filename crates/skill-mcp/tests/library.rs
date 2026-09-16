@@ -59,7 +59,7 @@ fn search_reads_routing_and_load_reads_a_body() {
     let path = bundle_at(&dir);
 
     let lib = library::Library::open(&path, None).expect("open library");
-    assert_eq!(lib.catalogue().unwrap().len(), 3);
+    assert_eq!(lib.catalogue().len(), 3);
 
     // Search answers from the routing plane. An empty query lists everything.
     let all = lib.search("", 50).unwrap();

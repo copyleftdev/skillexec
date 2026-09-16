@@ -65,13 +65,13 @@ fn main() {
             };
             let dict = flag(&args, "--dict")
                 .map(|p| Dictionary::new(&std::fs::read(p).expect("read dictionary")));
-            route_bench(list, profile, dict.as_ref());
+            route_bench(list, profile, dict.as_ref(), &args);
         }
         Some("roles") => {
-            role_census(args.get(1).map_or("-", String::as_str));
+            role_census(args.get(1).map_or("-", String::as_str), &args);
         }
         Some("cas") => {
-            cas_census(args.get(1).map_or("-", String::as_str));
+            cas_census(args.get(1).map_or("-", String::as_str), &args);
         }
         Some("show") => {
             let path = args.get(1).map_or("bundle.skill", String::as_str);
@@ -84,18 +84,14 @@ fn main() {
             let out = args.get(2).map_or("bundle.skill", String::as_str);
             let dict = flag(&args, "--dict")
                 .map(|p| Dictionary::new(&std::fs::read(p).expect("read dictionary")));
-            make_bundle(
-                list,
-                out,
-                dict.as_ref(),
-                args.iter().any(|a| a == "--embed"),
-            );
+            let embed = args.iter().any(|a| a == "--embed");
+            make_bundle(list, out, dict.as_ref(), embed, &args);
         }
         Some("dict") => {
             let list = args.get(1).map_or("-", String::as_str);
             let out = args.get(2).map_or("corpus.dict", String::as_str);
             let max: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(112_640);
-            train_dict(list, out, max);
+            train_dict(list, out, max, &args);
         }
         Some(path) => one(Path::new(path)),
         None => eprintln!(
@@ -127,12 +123,10 @@ fn show(path: &str, dict: Option<&Dictionary>) {
 }
 
 /// Compiles every skill in a list into one file, each a top-level skill in the routing block.
-fn make_bundle(list: &str, out: &str, dict: Option<&Dictionary>, embed: bool) {
-    let listing = std::fs::read_to_string(list).expect("read list");
+fn make_bundle(list: &str, out: &str, dict: Option<&Dictionary>, embed: bool, args: &[String]) {
     let mut docs = Vec::new();
     let mut src_bytes = 0usize;
-    for line in listing.lines() {
-        let path = PathBuf::from(line);
+    for path in read_list(list, args) {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -183,8 +177,7 @@ fn make_bundle(list: &str, out: &str, dict: Option<&Dictionary>, embed: bool) {
 /// The falsifiable claim in `GRAPH.md` §2 is that skills converge on a small set of section
 /// roles. If most headings on an unseen corpus fall through to plain prose, the taxonomy is a
 /// description of one machine's skills and not of skills.
-fn role_census(list: &str) {
-    let listing = std::fs::read_to_string(list).expect("read list");
+fn role_census(list: &str, args: &[String]) {
     let mut by_role: Vec<(u16, usize)> = Vec::new();
     // A map, not a Vec. The Vec version scanned the distinct-heading list once per heading:
     // invisible on a few thousand files, quadratic on a hundred thousand. The tool stalled on
@@ -193,8 +186,8 @@ fn role_census(list: &str) {
     let mut headings = 0usize;
     let mut files = 0usize;
 
-    for line in listing.lines() {
-        let Ok(src) = std::fs::read_to_string(line) else {
+    for path in read_list(list, args) {
+        let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
         files += 1;
@@ -253,8 +246,7 @@ fn role_census(list: &str) {
 ///
 /// `SPEC.md` §6 claims identical sections across skills store once. Inside one file that is
 /// tested; across a corpus it has never been measured.
-fn cas_census(list: &str) {
-    let listing = std::fs::read_to_string(list).expect("read list");
+fn cas_census(list: &str, args: &[String]) {
     // value = (occurrences, blob size)
     let mut seen: std::collections::HashMap<[u8; 32], (u32, usize)> =
         std::collections::HashMap::new();
@@ -263,8 +255,7 @@ fn cas_census(list: &str) {
     let mut payloads = 0u64;
     let mut files = 0usize;
 
-    for line in listing.lines() {
-        let path = PathBuf::from(line);
+    for path in read_list(list, args) {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -332,14 +323,12 @@ fn cas_census(list: &str) {
 /// relevant? For the container that is two string reads at a fixed offset. For compressed
 /// Markdown it is a full decompression of every candidate, because frontmatter is at the front
 /// of a stream that has to be decoded from the start.
-fn route_bench(list: &str, profile: Profile, dict: Option<&Dictionary>) {
-    let listing = std::fs::read_to_string(list).expect("read list");
+fn route_bench(list: &str, profile: Profile, dict: Option<&Dictionary>, args: &[String]) {
     let mut containers: Vec<Vec<u8>> = Vec::new();
     let mut zstd_md: Vec<Vec<u8>> = Vec::new();
     let mut raw_md: Vec<String> = Vec::new();
 
-    for line in listing.lines() {
-        let path = PathBuf::from(line);
+    for path in read_list(list, args) {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -400,11 +389,9 @@ fn route_bench(list: &str, profile: Profile, dict: Option<&Dictionary>) {
 
 /// Trains on the COLD regions of compiled containers rather than on the Markdown, because
 /// those are the bytes a dictionary will actually be asked to help with.
-fn train_dict(list: &str, out: &str, max: usize) {
-    let listing = std::fs::read_to_string(list).expect("read list");
+fn train_dict(list: &str, out: &str, max: usize, args: &[String]) {
     let mut samples: Vec<Vec<u8>> = Vec::new();
-    for line in listing.lines() {
-        let path = PathBuf::from(line);
+    for path in read_list(list, args) {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -430,6 +417,25 @@ fn train_dict(list: &str, out: &str, max: usize) {
         samples.len(),
         total as f64 / 1.048_576e6
     );
+}
+
+/// Reads a corpus listing, honouring a universal `--limit`.
+///
+/// Every subcommand that materialises a corpus in memory goes through here. `route` holds every
+/// skill in both representations at once and peaked around 2.2 GB on 680,924 of them; `cas`
+/// holds a hash per distinct payload. Those are deliberate batch runs, but a tool with no way to
+/// say "only this many" is a tool that can only be run at full size or not at all.
+fn read_list(path: &str, args: &[String]) -> Vec<PathBuf> {
+    let limit = flag(args, "--limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(usize::MAX);
+    std::fs::read_to_string(path)
+        .expect("read list")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(limit)
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {

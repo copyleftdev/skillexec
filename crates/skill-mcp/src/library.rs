@@ -1,10 +1,12 @@
 //! A set of `.skill` containers, searched through their routing planes.
 //!
-//! Containers are held as raw bytes and reopened per request. That sounds wasteful and is not:
-//! `Skill::routing_view` reads the 64-byte header and the routing block that follows it, and
-//! nothing else — measured at 183 ns and 249 bytes per skill on a corpus of 680,924. Holding
-//! parsed `Skill` values instead would mean a self-referential struct to save work that does not
-//! exist.
+//! Container bytes are held, and the routing plane is parsed **once** at open: names,
+//! descriptions and vectors are immutable for the life of the server, and re-deriving them per
+//! query allocated two strings per skill per search. Invisible at 192 skills and about 100 MB of
+//! churn per query at 680,000.
+//!
+//! Bodies are a different matter and are still read on demand — `Skill::open_with` happens only
+//! inside `load` and `segments`, never on the search path.
 //!
 //! The split between `search` and `load` is the format's tier split made visible: search never
 //! touches a payload region, so a body is decompressed only once something has asked for it.
@@ -33,10 +35,18 @@ use std::sync::Mutex;
 
 use skill_format::{Dictionary, Skill, TrustPolicy, embed};
 
+/// Refuse a library larger than this rather than loading it and finding out. The whole file is
+/// resident, so an unbounded `open` is an unbounded allocation driven by whatever is on disk.
+pub const MAX_LIBRARY_BYTES: u64 = 2 << 30;
+
 pub struct Library {
     containers: Vec<(PathBuf, Vec<u8>)>,
     dict: Option<Dictionary>,
     policy: TrustPolicy,
+    /// Parsed once at open. Immutable for the life of the server.
+    catalogue: Vec<Hit>,
+    /// One per catalogue entry, aligned by index; `None` when that container carries no vectors.
+    vectors: Vec<Option<Vec<f32>>>,
     /// Built on first semantic query, and only when some container actually carries vectors.
     /// Loading an ONNX model costs about half a second; a lexical-only library never pays it.
     embedder: Mutex<Option<skill_embed::Embedder>>,
@@ -88,11 +98,25 @@ impl Library {
                 .filter(|p| p.extension().is_some_and(|e| e == "skill"))
                 .collect();
             entries.sort();
+            let mut total = 0u64;
             for p in entries {
+                total += p.metadata().map_or(0, |m| m.len());
+                anyhow::ensure!(
+                    total <= MAX_LIBRARY_BYTES,
+                    "library at {} exceeds {} bytes; split it or raise MAX_LIBRARY_BYTES",
+                    path.display(),
+                    MAX_LIBRARY_BYTES
+                );
                 let bytes = std::fs::read(&p)?;
                 containers.push((p, bytes));
             }
         } else {
+            let len = path.metadata().map_or(0, |m| m.len());
+            anyhow::ensure!(
+                len <= MAX_LIBRARY_BYTES,
+                "{} is {len} bytes, over the {MAX_LIBRARY_BYTES} limit",
+                path.display()
+            );
             containers.push((path.to_path_buf(), std::fs::read(path)?));
         }
         anyhow::ensure!(
@@ -100,13 +124,35 @@ impl Library {
             "no .skill containers at {}",
             path.display()
         );
-        let has_vectors = containers
-            .iter()
-            .any(|(_, b)| Skill::routing_view_with_embeddings(b).is_ok_and(|(_, e)| e.is_some()));
+
+        let mut catalogue = Vec::new();
+        let mut vectors = Vec::new();
+        for (p, bytes) in &containers {
+            let container = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (entries, emb) = Skill::routing_view_with_embeddings(bytes)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+            for (i, e) in entries.iter().enumerate() {
+                catalogue.push(Hit {
+                    name: e.name.to_string(),
+                    description: e.description.to_string(),
+                    container: container.clone(),
+                    lexical: 0.0,
+                    semantic: 0.0,
+                });
+                vectors.push(emb.as_ref().and_then(|v| v.get(i)).map(<[f32]>::to_vec));
+            }
+        }
+        let has_vectors = vectors.iter().any(Option::is_some);
+
         Ok(Self {
             containers,
             dict,
             policy: TrustPolicy::permissive(),
+            catalogue,
+            vectors,
             embedder: Mutex::new(None),
             has_vectors,
         })
@@ -116,26 +162,9 @@ impl Library {
     ///
     /// # Errors
     /// Fails if a container's routing block is malformed.
-    pub fn catalogue(&self) -> anyhow::Result<Vec<Hit>> {
-        let mut out = Vec::new();
-        for (path, bytes) in &self.containers {
-            let container = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let entries = Skill::routing_view(bytes)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-            for e in entries {
-                out.push(Hit {
-                    name: e.name.to_string(),
-                    description: e.description.to_string(),
-                    container: container.clone(),
-                    lexical: 0.0,
-                    semantic: 0.0,
-                });
-            }
-        }
-        Ok(out)
+    #[must_use]
+    pub fn catalogue(&self) -> &[Hit] {
+        &self.catalogue
     }
 
     /// Ranks skills by matching words and, when the library carries vectors, by meaning.
@@ -169,23 +198,25 @@ impl Library {
         semantic_weight: f32,
     ) -> anyhow::Result<Vec<Hit>> {
         let terms = terms_of(query);
-        let catalogue = self.catalogue()?;
+        let catalogue = self.catalogue();
         // A query that reduces to no usable terms is no query. Listing is honest; inventing a
         // ranking out of stopwords is not.
         if terms.is_empty() {
-            let mut all = catalogue;
+            let mut all = catalogue.to_vec();
             all.sort_by(|a, b| a.name.cmp(&b.name));
-            return Ok(all.into_iter().take(limit).collect());
+            all.truncate(limit);
+            return Ok(all);
         }
 
-        let lexical = Self::lexical_scores(&catalogue, &terms);
-        let semantic = self.semantic_scores(query, catalogue.len());
+        let lexical = Self::lexical_scores(catalogue, &terms);
+        let semantic = self.semantic_scores(query);
 
         let lex_max = lexical.iter().copied().fold(0.0f32, f32::max);
         let sem_max = semantic.iter().copied().fold(0.0f32, f32::max);
 
         let mut scored: Vec<(f32, Hit)> = Vec::new();
-        for (i, mut h) in catalogue.into_iter().enumerate() {
+        for (i, h) in catalogue.iter().enumerate() {
+            let mut h = h.clone();
             let lex = if lex_max > 0.0 {
                 lexical[i] / lex_max
             } else {
@@ -256,8 +287,8 @@ impl Library {
     ///
     /// Negative similarities are clamped away: a vector pointing the other way is not evidence
     /// against a skill, it is the absence of evidence for it.
-    fn semantic_scores(&self, query: &str, n: usize) -> Vec<f32> {
-        let mut out = vec![0.0f32; n];
+    fn semantic_scores(&self, query: &str) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.catalogue.len()];
         if !self.has_vectors {
             return out;
         }
@@ -281,19 +312,9 @@ impl Library {
             return out;
         };
 
-        let mut at = 0usize;
-        for (_, bytes) in &self.containers {
-            let Ok((entries, emb)) = Skill::routing_view_with_embeddings(bytes) else {
-                continue;
-            };
-            for i in 0..entries.len() {
-                if at >= n {
-                    break;
-                }
-                if let Some(e) = emb.as_ref().and_then(|e| e.get(i)) {
-                    out[at] = embed::cosine(&q, e).max(0.0);
-                }
-                at += 1;
+        for (slot, v) in out.iter_mut().zip(&self.vectors) {
+            if let Some(v) = v {
+                *slot = embed::cosine(&q, v).max(0.0);
             }
         }
         out

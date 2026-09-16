@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
     println!(
         "{} queries against {} skills\n",
         cases.len(),
-        lib.catalogue()?.len()
+        lib.catalogue().len()
     );
     println!(
         "{:>6}  {:>8}  {:>8}  {:>6}  95% CI on top-1",

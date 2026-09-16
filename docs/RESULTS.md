@@ -522,6 +522,31 @@ a user cache, and a test suite that downloads a model on a clean machine is a te
 fails on a clean machine. The format-level embedding tests — layout, commitment, tamper
 detection, count mismatch — run without it.
 
+## Operational bounds
+
+What each tool costs, measured rather than assumed. The box these ran on is shared, and one
+unbounded fan-out during this work made it unresponsive; nothing here is theoretical.
+
+| Command | Peak RSS | Wall | Bounded by |
+|---|---|---|---|
+| `cargo test --workspace` | 152 MB | 0.7 s | — |
+| `scripts/fuzz.sh` | 50 MB | `--seconds` | iterations, wall clock, `--max-bytes` |
+| `skill-eval` (192 skills × 11 weights) | 76 MB | 2.7 s | library size |
+| `skillc cas` (192 skills) | 12 MB | <1 s | `--limit` |
+| `skillc route --limit 5000` | 99 MB | 12.6 s | `--limit` |
+| `skillc route --limit 40000` | 714 MB | 100 s | `--limit` |
+| `skillc route` (680,924) | **≈12 GB** | 24 min | `--limit` |
+| `corpusctl build` (1.9M files) | **1.0 GB** | 19 s | `--limit` |
+| `corpusctl clone` | small | — | `--jobs`, `--budget-gb`, per-clone timeout |
+| `skill-mcp` | library size | — | `MAX_LIBRARY_BYTES` (2 GB) |
+
+`route` is the expensive one and always was: it builds both representations of every skill in
+memory to time them against each other, at about 17.9 KB per skill. It is the only tool here that
+can reach double-digit gigabytes, and it now takes `--limit` like the rest.
+
+Every corpus subcommand accepts `--limit N`. A tool with no way to say "only this many" is a tool
+that can only be run at full size or not at all.
+
 ## Assembling a corpus
 
 The corpus tooling was shell first and is Rust now, because the shell version was the single

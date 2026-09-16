@@ -35,6 +35,23 @@ fn build(src: &str, spec: SegmentSpec) -> Vec<u8> {
     b.build().expect("build")
 }
 
+fn spec_wall(caps: &[u16], mem_kib: u32, cpu_ms: u32, wall_ms: u32) -> SegmentSpec {
+    SegmentSpec {
+        caps: caps
+            .iter()
+            .map(|k| Cap {
+                kind: *k,
+                flags: 0,
+                arg: String::new(),
+            })
+            .collect(),
+        mem_kib,
+        cpu_ms,
+        wall_ms,
+        ..SegmentSpec::inert(Abi::Wasm32Core)
+    }
+}
+
 fn spec(caps: &[u16], mem_kib: u32, cpu_ms: u32) -> SegmentSpec {
     SegmentSpec {
         caps: caps
@@ -196,4 +213,20 @@ fn every_capability_a_run_grants_was_declared_in_the_file() {
         .collect();
     let out = run(&s, 0, "run", &Policy::default()).unwrap();
     assert_eq!(out.granted, declared);
+}
+
+#[test]
+fn wall_clock_budget_is_enforced_independently_of_fuel() {
+    // Give it far more fuel than it can burn in the wall budget, so only the clock can stop it.
+    // If wall_ms is not enforced this still terminates -- on fuel, several seconds later -- and
+    // fails on the error kind rather than hanging.
+    let bytes = build(SPIN, spec_wall(&[], 256, 5_000, 50));
+    let s = open(&bytes);
+    let started = std::time::Instant::now();
+    let err = run(&s, 0, "run", &Policy::default()).expect_err("must stop");
+    assert!(
+        matches!(err, RunError::Interrupted),
+        "expected the wall clock to stop it, got {err:?} after {:?}",
+        started.elapsed()
+    );
 }

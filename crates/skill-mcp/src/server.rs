@@ -139,7 +139,7 @@ impl SkillServer {
     ) -> Result<Json<SearchResult>, ErrorData> {
         let limit = p.limit.unwrap_or(20).clamp(1, 200) as usize;
         let hits = self.library.search(&p.query, limit).map_err(|e| fail(&e))?;
-        let total = self.library.catalogue().map_err(|e| fail(&e))?.len();
+        let total = self.library.catalogue().len();
         Ok(Json(SearchResult {
             matched: hits.len(),
             total_in_library: total,

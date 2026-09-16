@@ -9,7 +9,9 @@
 //! `wasm32-wasip2` components rather than core modules, is future work. The gate is real; the
 //! world behind it is a stub.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use skill_format::{Abi, Kind, Skill, TrustClass, cap_kind};
 use wasmtime::{Config, Engine, Linker, Module, ResourceLimiter, Store, StoreLimits};
@@ -59,6 +61,51 @@ impl core::fmt::Display for RunError {
 }
 
 impl std::error::Error for RunError {}
+
+/// How often the epoch advances. The wall-clock budget is enforced to this granularity, so a
+/// segment asking for less than one tick still gets one.
+const EPOCH_TICK_MS: u64 = 10;
+
+/// Advances the engine's epoch until dropped, which is what makes a wall-clock deadline fire.
+///
+/// Without this, `epoch_interruption` and `set_epoch_deadline` are both configured and neither
+/// does anything: the counter never moves, so the deadline is never reached. A segment declaring
+/// a 50 ms wall budget ran 3.37 seconds and was stopped by fuel instead.
+struct EpochTicker {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EpochTicker {
+    fn start(engine: &Engine) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = {
+            // `Engine` is an `Arc` inside, so the clone is cheap and the thread holds nothing
+            // else alive.
+            let engine = engine.clone();
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
+                    engine.increment_epoch();
+                }
+            })
+        };
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 /// Ceilings the host imposes regardless of what a segment requests. A segment asking for more
 /// is refused rather than silently clamped: a skill that needs 4 GB should fail loudly on a
@@ -233,13 +280,27 @@ pub fn run(
         stdout: Arc::clone(&stdout),
     };
 
+    // wall_ms was decorative until now: epoch interruption was enabled and a deadline set, but
+    // nothing ever advanced the epoch, so the deadline could not fire. A segment declaring a
+    // 50 ms wall budget ran for 3.37 seconds and was stopped by fuel, not by the clock.
+    //
+    // An undeclared wall budget means the policy ceiling, never "unbounded". Of the three
+    // limits this was the only one that could run away: cpu_ms and mem_kib both clamp to a
+    // minimum of one unit when undeclared, which errs restrictive.
+    let wall_ms = if rec.wall_ms == 0 {
+        policy.max_wall_ms
+    } else {
+        rec.wall_ms
+    };
+    let ticks = (u64::from(wall_ms) / EPOCH_TICK_MS).max(1);
+
     let mut store = Store::new(&engine, state);
     store.limiter(|s| &mut s.limits);
     let fuel = u64::from(rec.cpu_ms.max(1)).saturating_mul(policy.fuel_per_ms);
     store
         .set_fuel(fuel)
         .map_err(|e| RunError::Instantiate(e.to_string()))?;
-    store.set_epoch_deadline(1);
+    store.set_epoch_deadline(ticks);
 
     let mut linker: Linker<HostState> = Linker::new(&engine);
     imports::provide(&mut linker, &declared).map_err(|e| RunError::Instantiate(e.to_string()))?;
@@ -251,7 +312,9 @@ pub fn run(
         .get_typed_func::<(), ()>(&mut store, entry)
         .map_err(|_| RunError::NoSuchEntry(entry.to_string()))?;
 
+    let ticker = EpochTicker::start(&engine);
     let call = func.call(&mut store, ());
+    drop(ticker);
     let used = fuel.saturating_sub(store.get_fuel().unwrap_or(0));
     call.map_err(|e| classify_trap(&e))?;
 
