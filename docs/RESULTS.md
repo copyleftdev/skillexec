@@ -180,6 +180,13 @@ Same 8,776 files. Every row is measured, not projected.
 The dictionary is 110 KB, trained once and shared; it is referenced by BLAKE3, not embedded,
 because 110 KB inside each of 8,776 files would cost 940 MB to save 6 MB.
 
+One caveat that cuts against the container, stated because it would be easy to leave out: the
+three Markdown rows were measured with the `zstd` CLI over **68.0 MB** — every file `cat` could
+read — while `skillc` reports **64.9 MB**, the subset that parsed as UTF-8. The baselines
+therefore compress about 5% more input than the container rows do, which flatters the container.
+`skillc route` re-measures the dictionary baseline over exactly the same file set and gets
+**19.35 MB**, not 20.3 MB. That is the number the comparison below uses.
+
 ### Reading the table honestly
 
 **The gap that was open is closed.** The container used to be *larger than its own source*
@@ -237,3 +244,36 @@ which re-digests the dictionary every time — work proportional to the *diction
 per *region*. Compiling the corpus went from ~1 s to minutes, and the cause was invisible in a
 unit test because a single-file test digests it once either way. `codec::Dictionary` now
 prepares the encoder and decoder forms once.
+
+
+## Routing cost
+
+Size is only half the comparison, and it is the half that favours compressed Markdown. The other
+half is what it costs to answer the question a router actually asks 8,776 times: *is this skill
+relevant?*
+
+`skillc route` builds every skill both ways in memory and times reading `name` and `description`
+from each. Same corpus, same dictionary, same process.
+
+| | Bytes | vs baseline | Routing | vs baseline |
+|---|---|---|---|---|
+| Container, `Mapped` + dict | 39.0 MB | 2.02× | **453 ns/skill** | **64.7× faster** |
+| Container, `Compact` + dict | 29.6 MB | 1.53× | 4,330 ns/skill | 6.7× faster |
+| Markdown, per-file zstd + same dict | 19.35 MB | 1.00× | 28,911 ns/skill | 1.00× |
+
+The profiles are a real trade curve rather than a good option and a bad one. `Mapped` keeps the
+string heap readable in place, so routing is two string reads and no decoding at all. `Compact`
+compresses that heap too: 24% fewer bytes, and routing now has to inflate one small section per
+skill — still an order of magnitude cheaper than the Markdown path.
+
+The asymmetry against Markdown is structural, not an optimisation. Frontmatter sits at the front
+of a stream that decodes from the start, so reading one description out of a zstd'd `SKILL.md`
+means decompressing the whole file — 5.5 KB of median body, to read maybe 200 bytes of it. The
+container never touches a payload region to answer the question, which is what the tier split in
+`GRAPH.md` §4 was for: not a convention a loader politely follows, but a layout in which the body
+is somewhere the router does not go.
+
+So the summary is a trade, not a win: **1.5× to 2× the bytes on disk, 7× to 65× less work per
+routing decision**, plus a signed graph, per-boundary commitments and capability records the
+Markdown does not carry at all. Whether that is worth it depends entirely on whether anything
+ever routes over the corpus. For an archive nobody queries, gzip the Markdown.

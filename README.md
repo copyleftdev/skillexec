@@ -22,10 +22,11 @@ cargo run --release --bin skillc -- corpus <list> --profile compact --dict corpu
 ```
 
 All 8,776 `SKILL.md` files on this workstation compile, verify, and render back — 99.85%
-byte-exact, 100% modulo trailing whitespace. 46M fuzz inputs, zero panics, 31 MB peak RSS. TLC
-proves the validator's single forward pass equivalent to the semantic tree invariants over every
-five-node graph, and found two ways activation could fail to terminate that the fuzzer could
-not reach.
+byte-exact, 100% modulo trailing whitespace. Compiled and compressed they are **54% smaller than
+their source**, and route **64× faster** than the same skills stored as compressed Markdown — at
+about twice the bytes. 46M fuzz inputs, zero panics. TLC proves the validator's single forward
+pass equivalent to the semantic tree invariants over every five-node graph, and found two ways
+activation could fail to terminate that the fuzzer could not reach.
 
 ## Why
 
@@ -36,7 +37,9 @@ vocabulary. Compiling that graph buys three things Markdown cannot:
 
 - **Progressive disclosure becomes layout.** Tier is monotone from parent to child, so the
   loaded set is always a prefix-closed subtree, and the routing plane is physically separate
-  from the bodies. A loader cannot read a body to decide whether it wants one.
+  from the bodies — separately compressed, so a router decompresses nothing. A loader cannot
+  read a body to decide whether it wants one. Measured: 453 ns to route one skill, against
+  29 µs to decompress its Markdown and read the frontmatter.
 - **Executable content gets an identity.** 184 of 8,776 skills ship a `scripts/` directory, yet
   compiling the corpus lifts **19,534** executable fragments out of fenced code blocks —
   executable in intent, inert in practice. A `Segment` node gives each one an ABI, a capability
