@@ -9,6 +9,7 @@ verified graph with executable segments.
 - `docs/RESULTS.md` — what compiling and fuzzing the corpus actually measured
 - `crates/skill-format` — reference reader, validator and canonical writer (`forbid(unsafe)`)
 - `crates/skillc` — `SKILL.md` → `.skill` compiler, and the renderer that proves the round-trip
+- `crates/skill-run` — capability-gated, resource-bounded wasm executor for segments
 - `specs/` — TLA+ models of the graph invariants, with canaries that must fail
 
 ```sh
@@ -39,6 +40,9 @@ vocabulary. Compiling that graph buys three things Markdown cannot:
   compiling the corpus lifts **19,534** executable fragments out of fenced code blocks —
   executable in intent, inert in practice. A `Segment` node gives each one an ABI, a capability
   set, resource limits, a BLAKE3 root and its own signature, and authorizes it for nothing.
+  `crates/skill-run` then enforces that set at **link time**: a wasm module reaches the host only
+  through its imports, so an undeclared import is never satisfied and the module never
+  instantiates.
 - **Verification precedes parsing.** Signatures cover a fixed 64-byte range that commits to the
   manifest root, which commits to every section and subtree hash. The parser only ever runs on
   bytes already proven to be the publisher's.

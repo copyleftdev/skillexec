@@ -158,5 +158,6 @@ pub fn abi_name(abi: Abi) -> &'static str {
         Abi::Python3 => "python3",
         Abi::Node => "node",
         Abi::Native => "native",
+        Abi::Wasm32Core => "wasm32-core",
     }
 }

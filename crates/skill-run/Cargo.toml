@@ -1,0 +1,17 @@
+[package]
+name = "skill-run"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Capability-gated, resource-bounded executor for .skill wasm segments"
+
+[dependencies]
+skill-format = { path = "../skill-format" }
+wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime", "wat", "gc-drc", "component-model"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+wat = "1"

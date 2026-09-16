@@ -176,7 +176,7 @@ graph, not four (§10.6). `CITES` is excluded and may cycle freely.
 |---|---|---|
 | 0x00 | 32 | `root` — BLAKE3 root of the decompressed segment |
 | 0x20 | 4 | `orig_len` — uncompressed length |
-| 0x24 | 2 | `abi` — 1 `wasm32-wasip2`, 2 `sh`, 3 `python3`, 4 `node`, 5 `native` |
+| 0x24 | 2 | `abi` — 1 `wasm32-wasip2`, 2 `sh`, 3 `python3`, 4 `node`, 5 `native`, 6 `wasm32-core` |
 | 0x26 | 1 | `codec` — 0 raw, 1 zstd, 2 zstd+dict |
 | 0x27 | 1 | `trust_class` — 0 `Portable`, 1 `HostTrusted` |
 | 0x28 | 4 | `cap_off` · 0x2C 2 `cap_cnt` · 0x2E 2 `flags` |
@@ -189,12 +189,23 @@ The record carries **no offset or length**: a segment's bytes are the payload of
 `Segment`-kind node it is parallel-indexed to (§10.4).
 
 Capability record (8 B): `kind u16`, `flags u16`, `arg_idx u32` → string heap.
-Kinds: `net:host`, `fs:read`, `fs:write`, `env`, `exec`, `clock`, `rand`.
+Kinds: `1 net:host`, `2 fs:read`, `3 fs:write`, `4 env`, `5 exec`, `6 clock`, `7 rand`, `8 stdio`.
 
-`abi = 1` is the only `Portable` value. A `HostTrusted` segment is *labelled*, never contained —
-the format cannot sandbox a shell script, and says so rather than implying otherwise. Policy of
-the form *"unknown publisher ⇒ Portable only"* is expressible because the distinction is a
-signed field, not a convention.
+ABIs `1` and `6` are the `Portable` values. A `HostTrusted` segment is *labelled*, never
+contained — the format cannot sandbox a shell script, and says so rather than implying
+otherwise. Policy of the form *"unknown publisher ⇒ Portable only"* is expressible because the
+distinction is a signed field, not a convention.
+
+**Capabilities are enforced at link time, not at call time.** A wasm module reaches the host only
+through its imports, so `crates/skill-run` refuses to *satisfy* an import the segment did not
+declare, and refuses to instantiate at all if one is missing. There is no call site left to
+guard, and an import this host does not recognise is a refusal rather than a shrug — a host that
+ignores imports it does not understand has no capability model.
+
+Limits are enforced by the runtime: `cpu_ms` becomes wasmtime fuel, `mem_kib` a store limit,
+`wall_ms` an epoch deadline. A segment asking for more than the host's ceiling is **refused, not
+clamped**: a skill written for 4 GB should fail loudly on a host that will not give it, rather
+than run in a shape its author never tested.
 
 ## 5. Verification order (normative)
 

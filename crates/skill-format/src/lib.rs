@@ -15,7 +15,7 @@ mod validate;
 pub mod writer;
 
 pub use error::{Error, Result};
-pub use graph::{Abi, Edge, EdgeKind, Kind, Node, Segment, Tier, TrustClass};
+pub use graph::{Abi, Edge, EdgeKind, Kind, Node, Segment, Tier, TrustClass, cap_kind};
 pub use header::Header;
 pub use manifest::Manifest;
 pub use sig::{SigEntry, TrustPolicy};

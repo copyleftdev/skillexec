@@ -82,6 +82,9 @@ pub enum Abi {
     Python3 = 3,
     Node = 4,
     Native = 5,
+    /// A core wasm module rather than a component. Portable like `Wasm32Wasip2`; separate
+    /// because the host has to know which one it is before it can instantiate anything.
+    Wasm32Core = 6,
 }
 
 impl Abi {
@@ -92,13 +95,14 @@ impl Abi {
             3 => Self::Python3,
             4 => Self::Node,
             5 => Self::Native,
+            6 => Self::Wasm32Core,
             other => return Err(Error::UnknownAbi(other)),
         })
     }
 
     #[must_use]
     pub fn is_portable(self) -> bool {
-        matches!(self, Self::Wasm32Wasip2)
+        matches!(self, Self::Wasm32Wasip2 | Self::Wasm32Core)
     }
 }
 
@@ -107,6 +111,33 @@ impl Abi {
 pub enum TrustClass {
     Portable = 0,
     HostTrusted = 1,
+}
+
+/// Capability kinds, as stored in a capability record's `kind` field (`SPEC.md` §4.6).
+pub mod cap_kind {
+    pub const NET_HOST: u16 = 1;
+    pub const FS_READ: u16 = 2;
+    pub const FS_WRITE: u16 = 3;
+    pub const ENV: u16 = 4;
+    pub const EXEC: u16 = 5;
+    pub const CLOCK: u16 = 6;
+    pub const RAND: u16 = 7;
+    pub const STDIO: u16 = 8;
+
+    #[must_use]
+    pub fn name(kind: u16) -> &'static str {
+        match kind {
+            NET_HOST => "net:host",
+            FS_READ => "fs:read",
+            FS_WRITE => "fs:write",
+            ENV => "env",
+            EXEC => "exec",
+            CLOCK => "clock",
+            RAND => "rand",
+            STDIO => "stdio",
+            _ => "unknown",
+        }
+    }
 }
 
 pub mod node_flags {

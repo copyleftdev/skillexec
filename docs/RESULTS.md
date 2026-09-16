@@ -127,3 +127,35 @@ found nothing here, and the model checker found nothing the fuzzer was looking f
 It also corrected the spec. `SPEC.md` §4.4 claimed the tree invariant was proven by one
 comparison per node. It is not; `parent = ⟨0,1,1,1,2⟩` has every parent preceding its child and a
 subtree split in half. The ancestor walk is doing the work.
+
+
+## The sandbox
+
+`crates/skill-run` executes a `Portable` segment under exactly the capabilities its record
+declares. Ten tests, each asserting one property of the gate:
+
+| Property | Test |
+|---|---|
+| an undeclared import is refused **before instantiation** | a module importing `fd_write` with no `stdio` capability |
+| the same module runs once the capability is declared | output captured, `granted == ["stdio"]` |
+| an unrecognised import is refused, not ignored | `import "evil" "backdoor"` → `needs: "unknown"` |
+| a segment with no imports needs no capabilities | pure compute runs with an empty grant set |
+| `cpu_ms` is enforced | an infinite loop returns `OutOfFuel`, not a hang |
+| `mem_kib` is enforced | `memory.grow` fails inside a 64 KiB budget and succeeds inside 8 MiB |
+| a segment may not exceed the host ceiling | refused with `LimitExceedsPolicy`, never clamped |
+| a `HostTrusted` segment is refused by default | `Abi::Sh` → `NotPortable` |
+| tampered bytes are refused before compilation | `IntegrityFailed`, via the §5 step-7 hash |
+| every granted capability was declared in the file | grant set equals the file's capability table |
+
+The design point is that enforcement happens at **linking**. A wasm module can only reach the
+host through its imports, so declining to satisfy an undeclared import makes the capability
+unreachable rather than merely guarded — there is no call site left to check, and nothing to
+forget to check.
+
+### What it is not
+
+Not a WASI host. Granted capabilities other than `stdio` link and then report unsupported: the
+segment is authorized and there is nothing behind the door yet. `wasm32-wasip2` components are
+not executed either — ABI `6` (`wasm32-core`) is what runs today. The gate is real; the world
+behind it is a stub, and pretending otherwise would be the kind of claim this project exists to
+avoid making.
