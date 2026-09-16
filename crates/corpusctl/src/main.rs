@@ -17,7 +17,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -78,15 +78,105 @@ fn skill_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn dir_size_gb(root: &Path) -> u64 {
-    let bytes: u64 = walkdir::WalkDir::new(root)
+fn dir_size_bytes(root: &Path) -> u64 {
+    walkdir::WalkDir::new(root)
         .into_iter()
         .filter_map(Result::ok)
         .filter_map(|e| e.metadata().ok())
         .filter(std::fs::Metadata::is_file)
         .map(|m| m.len())
-        .sum();
-    bytes / (1024 * 1024 * 1024)
+        .sum()
+}
+
+// ---------------------------------------------------------------------------- budget
+
+/// How many times a clone waits for another clone's reservation to reconcile before giving up its
+/// turn. The wait is bounded at `ADMIT_TRIES × ADMIT_BACKOFF`, so contention costs time and never
+/// a spin; a repo that never gets in is reported as past budget and the run moves on.
+const ADMIT_TRIES: u32 = 4;
+const ADMIT_BACKOFF: Duration = Duration::from_millis(250);
+
+/// The disk ceiling a clone run holds itself to.
+///
+/// The ceiling is charged, not sampled. Walking the whole destination tree costs more than a clone
+/// does, so it is walked once here — which is also how a resumed run counts what is already on
+/// disk — and every clone afterwards keeps the total current by measuring only the tree it wrote.
+///
+/// `used` is what admission spends: bytes on disk plus every reservation in flight. `charged` is
+/// bytes on disk alone. They are separate because a refusal means two different things, and
+/// treating them alike is what would let a modest budget stop a run that had barely started.
+struct Budget {
+    ceiling: u64,
+    used: AtomicU64,
+    charged: AtomicU64,
+    full: AtomicBool,
+}
+
+impl Budget {
+    fn new(root: &Path, gb: u64) -> Self {
+        let on_disk = dir_size_bytes(root);
+        Self {
+            ceiling: gb.saturating_mul(1024 * 1024 * 1024),
+            used: AtomicU64::new(on_disk),
+            charged: AtomicU64::new(on_disk),
+            full: AtomicBool::new(false),
+        }
+    }
+
+    /// Whether the bytes on disk have reached the ceiling, which is terminal for the run.
+    fn is_full(&self) -> bool {
+        self.full.load(Ordering::Relaxed)
+    }
+
+    /// Holds `bytes` against the ceiling for the caller, or refuses.
+    ///
+    /// Reserving before the clone rather than checking after it is the point of the whole
+    /// structure: a check on the current total says nothing about the clones already running, so
+    /// with N workers it can be N repos stale. A reservation is held by the clone that will spend
+    /// it, so the ceiling holds however many run at once.
+    fn admit(&self, bytes: u64) -> bool {
+        for _ in 0..ADMIT_TRIES {
+            // Bytes on disk alone at the ceiling: the run really is done, and every later repo
+            // can stop without measuring anything.
+            if self.charged.load(Ordering::Relaxed) >= self.ceiling {
+                self.full.store(true, Ordering::Relaxed);
+                return false;
+            }
+            if self.used.fetch_add(bytes, Ordering::Relaxed) + bytes <= self.ceiling {
+                return true;
+            }
+            // The shortfall is other clones' reservations rather than spent bytes, so this is
+            // contention. Wait for one of them to reconcile instead of declaring the budget gone.
+            self.used.fetch_sub(bytes, Ordering::Relaxed);
+            std::thread::sleep(ADMIT_BACKOFF);
+        }
+        false
+    }
+
+    /// Gives back a reservation whose clone never happened.
+    fn release(&self, reserved: u64) {
+        self.used.fetch_sub(reserved, Ordering::Relaxed);
+    }
+
+    /// Turns a reservation into the bytes it actually cost.
+    ///
+    /// Returns `false` when those bytes carry the total past the ceiling, and the caller must then
+    /// remove what it wrote. A reservation for a repo the listing gave no size for is a guess, and
+    /// keeping a repo that beat its guess would leave a ceiling that holds everywhere except where
+    /// it was tested.
+    fn commit(&self, reserved: u64, actual: u64) -> bool {
+        // Charge before releasing, so the total never dips below what is on disk and a concurrent
+        // clone cannot be admitted against bytes that are already spent.
+        self.used.fetch_add(actual, Ordering::Relaxed);
+        self.used.fetch_sub(reserved, Ordering::Relaxed);
+        if self.charged.fetch_add(actual, Ordering::Relaxed) + actual > self.ceiling {
+            self.charged.fetch_sub(actual, Ordering::Relaxed);
+            self.used.fetch_sub(actual, Ordering::Relaxed);
+            self.full.store(true, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------- clone
@@ -132,12 +222,10 @@ fn clone(args: &[String]) {
     let failed = AtomicU64::new(0);
     let over_budget = AtomicU64::new(0);
     let started = Instant::now();
-    // Sampled rather than recomputed per repo: walking a 20 GB tree for every clone costs more
-    // than the clone does.
-    let budget_hit = std::sync::atomic::AtomicBool::new(false);
+    let budget = Budget::new(&dest, budget_gb);
 
     repos.par_iter().for_each(|(full, kb)| {
-        if budget_hit.load(Ordering::Relaxed) {
+        if budget.is_full() {
             over_budget.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -153,14 +241,17 @@ fn clone(args: &[String]) {
         }
         let _ = fs::remove_dir_all(&path);
 
-        let done = cloned.load(Ordering::Relaxed);
-        if done.is_multiple_of(64) && dir_size_gb(&dest) >= budget_gb {
-            budget_hit.store(true, Ordering::Relaxed);
+        // A listing without a size reserves `max_kb`, which is the most a repo is allowed to cost
+        // anyway; `commit` below replaces the guess with what the pruned tree really occupies.
+        let reserved = if *kb > 0 { *kb } else { max_kb }.saturating_mul(1024);
+        if !budget.admit(reserved) {
+            over_budget.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
         if !git_clone(full, &path, timeout) {
             let _ = fs::remove_dir_all(&path);
+            budget.release(reserved);
             failed.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -169,6 +260,11 @@ fn clone(args: &[String]) {
         prune_repo(&path, &sidecar);
         let _ = fs::create_dir_all(&path);
         let _ = fs::File::create(path.join(".done"));
+        if !budget.commit(reserved, dir_size_bytes(&path)) {
+            let _ = fs::remove_dir_all(&path);
+            over_budget.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let n = cloned.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_multiple_of(100) {
             println!("  cloned {n} in {:?}", started.elapsed());
@@ -462,4 +558,154 @@ fn build(args: &[String]) {
     println!("held out     {}", kept.len());
     println!("repos        {}", repos.len());
     println!("elapsed      {:?}", started.elapsed());
+}
+
+// ---------------------------------------------------------------------------- tests
+
+#[cfg(test)]
+mod tests {
+    use super::{ADMIT_BACKOFF, ADMIT_TRIES, Budget};
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    /// An empty directory that exists, so `Budget::new` starts from a walk of nothing rather than
+    /// from a walk that failed. Tagged per test because these all run in one process.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("corpusctl-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).expect("scratch");
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_reservation_that_fits_is_admitted_and_one_that_does_not_is_refused() {
+        let d = Scratch::new("fits");
+        let b = Budget::new(d.path(), 1);
+        assert!(b.admit(GB / 2));
+        assert!(b.admit(GB / 2));
+        // Nothing is on disk yet, so this is contention rather than a spent budget: refused
+        // after the bounded wait, and the run is not declared over.
+        assert!(!b.admit(1));
+        assert!(!b.is_full());
+    }
+
+    #[test]
+    fn a_refused_reservation_is_not_left_charged() {
+        let d = Scratch::new("no-leak");
+        let b = Budget::new(d.path(), 1);
+        assert!(b.admit(GB));
+        assert!(!b.admit(1));
+        b.release(GB);
+        // The refused attempt must not have leaked its reservation, or this would not fit.
+        assert!(b.admit(GB));
+    }
+
+    #[test]
+    fn committing_replaces_the_guess_with_what_was_really_used() {
+        let d = Scratch::new("commit");
+        let b = Budget::new(d.path(), 1);
+        let guess = GB / 2;
+        assert!(b.admit(guess));
+        assert!(b.commit(guess, 1024));
+        assert_eq!(b.charged.load(Ordering::Relaxed), 1024);
+        assert_eq!(b.used.load(Ordering::Relaxed), 1024);
+        // The guess is back, so a whole further budget's worth still fits.
+        assert!(b.admit(GB - 1024));
+    }
+
+    #[test]
+    fn a_repo_that_beats_its_guess_is_refused_rather_than_kept() {
+        let d = Scratch::new("beats-guess");
+        let b = Budget::new(d.path(), 1);
+        let guess = GB / 2;
+        assert!(b.admit(guess));
+        // Cloned bigger than the listing implied, and past the ceiling.
+        assert!(!b.commit(guess, GB + 1));
+        assert_eq!(b.charged.load(Ordering::Relaxed), 0);
+        assert_eq!(b.used.load(Ordering::Relaxed), 0);
+        assert!(b.is_full(), "past the ceiling on disk is terminal");
+    }
+
+    #[test]
+    fn a_spent_budget_is_terminal_and_a_contended_one_is_not() {
+        let d = Scratch::new("terminal");
+        let b = Budget::new(d.path(), 1);
+        assert!(b.admit(GB));
+        assert!(b.commit(GB, GB));
+        assert!(!b.admit(1));
+        assert!(b.is_full(), "bytes on disk reached the ceiling");
+    }
+
+    #[test]
+    fn refusal_is_bounded_in_time() {
+        let d = Scratch::new("bounded");
+        let b = Budget::new(d.path(), 1);
+        assert!(b.admit(GB));
+        let t = std::time::Instant::now();
+        assert!(!b.admit(1));
+        // Bounded above by the retry schedule, and below it: a refusal that returned instantly
+        // would mean contention was never waited out.
+        assert!(t.elapsed() >= ADMIT_BACKOFF, "gave up without waiting");
+        assert!(
+            t.elapsed() < ADMIT_BACKOFF * (ADMIT_TRIES + 2),
+            "waited longer than the schedule allows: {:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn concurrent_admissions_never_exceed_the_ceiling() {
+        let d = Scratch::new("concurrent");
+        let b = Budget::new(d.path(), 1);
+        let each = GB / 8;
+        // Sixty-four workers against a budget holding eight: whatever the interleaving, the
+        // reservations granted must not add up past the ceiling. This is the property the old
+        // every-64-clones sample could not state.
+        let granted = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..64)
+                .map(|_| s.spawn(|| u64::from(b.admit(each))))
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).sum::<u64>()
+        });
+        assert_eq!(
+            granted, 8,
+            "granted {granted} reservations of an eighth each"
+        );
+        assert!(b.used.load(Ordering::Relaxed) <= b.ceiling);
+    }
+
+    #[test]
+    fn a_resumed_run_counts_what_is_already_on_disk() {
+        let d = Scratch::new("resumed");
+        std::fs::write(d.path().join("already"), vec![0u8; 4096]).expect("write");
+        let b = Budget::new(d.path(), 1);
+        assert_eq!(b.charged.load(Ordering::Relaxed), 4096);
+        assert!(
+            !b.admit(GB),
+            "the resumed bytes must leave no room for a full budget"
+        );
+    }
+
+    #[test]
+    fn dir_size_of_a_missing_directory_is_zero_rather_than_a_panic() {
+        assert_eq!(
+            super::dir_size_bytes(Path::new("/nonexistent/for/this/test")),
+            0
+        );
+    }
 }

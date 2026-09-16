@@ -529,7 +529,7 @@ unbounded fan-out during this work made it unresponsive; nothing here is theoret
 
 | Command | Peak RSS | Wall | Bounded by |
 |---|---|---|---|
-| `cargo test --workspace` | 152 MB | 0.7 s | — |
+| `cargo test --workspace` | 168 MB | 0.8 s | — |
 | `scripts/fuzz.sh` | 50 MB | `--seconds` | iterations, wall clock, `--max-bytes` |
 | `skill-eval` (192 skills × 11 weights) | 76 MB | 2.7 s | library size |
 | `skillc cas` (192 skills) | 12 MB | <1 s | `--limit` |
@@ -538,11 +538,38 @@ unbounded fan-out during this work made it unresponsive; nothing here is theoret
 | `skillc route` (680,924) | **≈12 GB** | 24 min | `--limit` |
 | `corpusctl build` (1.9M files) | **1.0 GB** | 19 s | `--limit` |
 | `corpusctl clone` | small | — | `--jobs`, `--budget-gb`, per-clone timeout |
+| `corpusctl clone --budget-gb 0` | small | 99 µs | refuses every repo, does not sample |
 | `skill-mcp` | library size | — | `MAX_LIBRARY_BYTES` (2 GB) |
 
 `route` is the expensive one and always was: it builds both representations of every skill in
 memory to time them against each other, at about 17.9 KB per skill. It is the only tool here that
 can reach double-digit gigabytes, and it now takes `--limit` like the rest.
+
+### The disk budget is charged, not sampled
+
+`corpusctl clone --budget-gb` first checked the total every 64 clones, on the grounds that walking
+a 20 GB tree per clone costs more than a clone does. The arithmetic behind that is wrong in a way
+worth writing down: a check on the current total says nothing about the clones already running, so
+with eight workers it is up to eight repos stale — and between two samples it is 64.
+
+The walk was never the thing that had to happen per clone; only the accounting was. The tree is
+now walked once at startup, which is also how a resumed run counts what is already on disk, and
+each clone keeps the total current by measuring the one tree it just wrote. Admission reserves the
+repo's listed size — or `--max-kb`, when the listing carries no size — before the clone starts, so
+in-flight work is counted rather than invisible, and reconciles the guess against the real bytes
+afterwards.
+
+That split makes a refusal mean two different things, and conflating them is what would let a
+modest budget stop a run that had barely started. Bytes *on disk* at the ceiling is terminal. A
+shortfall made of other clones' reservations is contention, and the answer is to wait for one to
+reconcile — four tries, 250 ms apart, so a wedged run costs a second and never spins.
+
+One case is left, and it is left deliberately. A repo the listing gave no size for can clone
+larger than its reservation guessed. The peak *during* such a clone is bounded only by the
+per-clone timeout; at rest it is not tolerated, and a clone that lands past the ceiling is deleted
+rather than kept, because a budget that holds everywhere except where it was tested is not a
+budget. Nine unit tests cover the accounting, including sixty-four threads against a budget
+holding eight; removing the reservation fails seven of them.
 
 Every corpus subcommand accepts `--limit N`. A tool with no way to say "only this many" is a tool
 that can only be run at full size or not at all.
@@ -580,7 +607,7 @@ bounded parallelism over the walk.
 
 The first clone run staged repositories in the session scratchpad, which lives under `/tmp` —
 **tmpfs on this machine**. Fourteen gigabytes of git repositories went into RAM before anyone
-looked. Clones now go to real disk, and `corpusctl clone` samples a disk budget as it works.
+looked. Clones now go to real disk, and `corpusctl clone` charges a disk budget per clone.
 A scratch directory is not scratch space if it is backed by memory.
 
 The second mistake was fan-out: enough concurrent background work to make the machine
