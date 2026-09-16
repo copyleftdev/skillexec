@@ -162,7 +162,9 @@ fn role_census(list: &str) {
 /// tested; across a corpus it has never been measured.
 fn cas_census(list: &str) {
     let listing = std::fs::read_to_string(list).expect("read list");
-    let mut seen: std::collections::HashMap<[u8; 32], u32> = std::collections::HashMap::new();
+    // value = (occurrences, blob size)
+    let mut seen: std::collections::HashMap<[u8; 32], (u32, usize)> =
+        std::collections::HashMap::new();
     let mut total = 0u64;
     let mut unique = 0u64;
     let mut payloads = 0u64;
@@ -189,17 +191,27 @@ fn cas_census(list: &str) {
             payloads += 1;
             total += p.len() as u64;
             let h = *blake3::hash(p).as_bytes();
-            let e = seen.entry(h).or_insert(0);
-            if *e == 0 {
+            let e = seen.entry(h).or_insert((0, p.len()));
+            if e.0 == 0 {
                 unique += p.len() as u64;
             }
-            *e += 1;
+            e.0 += 1;
         }
     }
 
-    let mut shared: Vec<(u32, [u8; 32])> = seen.iter().map(|(h, n)| (*n, *h)).collect();
-    shared.sort_unstable_by_key(|(n, _)| std::cmp::Reverse(*n));
-    let reused = shared.iter().filter(|(n, _)| *n > 1).count();
+    // Ranked by bytes saved, not by count: a two-byte blob repeated ten thousand times says
+    // nothing about whether skills share content, and ranking by count surfaces only those.
+    let mut shared: Vec<(u64, u32, usize)> = seen
+        .values()
+        .map(|(n, len)| (u64::from(*n - 1) * *len as u64, *n, *len))
+        .collect();
+    shared.sort_unstable_by_key(|(saved, _, _)| std::cmp::Reverse(*saved));
+    let reused = seen.values().filter(|(n, _)| *n > 1).count();
+    let tiny_saved: u64 = shared
+        .iter()
+        .filter(|(_, _, l)| *l < 64)
+        .map(|(s, _, _)| *s)
+        .sum();
     println!("files            {files}");
     println!("payload nodes    {payloads}");
     println!("distinct blobs   {}", seen.len());
@@ -213,9 +225,13 @@ fn cas_census(list: &str) {
         "corpus-wide CAS  would store {:.1}% of the payload bytes",
         unique as f64 * 100.0 / total.max(1) as f64
     );
-    println!("\nmost-shared blobs:");
-    for (n, _) in shared.iter().take(8) {
-        println!("  x{n}");
+    println!(
+        "  of which blobs under 64 B account for {:.1}% of the saving",
+        tiny_saved as f64 * 100.0 / (total - unique).max(1) as f64
+    );
+    println!("\nblobs by bytes saved:");
+    for (saved, n, len) in shared.iter().take(8) {
+        println!("  {saved:>9} B saved   x{n:<6} {len} B each");
     }
 }
 
