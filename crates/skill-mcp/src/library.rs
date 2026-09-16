@@ -33,7 +33,9 @@ use std::path::{Path, PathBuf};
 const SEMANTIC_WEIGHT: f32 = 0.7;
 use std::sync::Mutex;
 
-use skill_format::{Dictionary, Skill, TrustPolicy, embed};
+use anyhow::Context;
+use skill_format::{Dictionary, EdgeKind, Skill, TrustPolicy, embed};
+use skillc::classify::{ROLE_ORG_ARTIFACT, ROLE_ORG_CHARTER, ROLE_ORG_GATE};
 
 /// Refuse a library larger than this rather than loading it and finding out. The whole file is
 /// resident, so an unbounded `open` is an unbounded allocation driven by whatever is on disk.
@@ -62,6 +64,32 @@ pub struct Hit {
     /// a caller can see why something ranked rather than having to trust the order.
     pub lexical: f32,
     pub semantic: f32,
+}
+
+/// One member of an organization, with what it hands on and what it refuses.
+#[derive(Debug, Clone)]
+pub struct Member {
+    pub name: String,
+    pub description: String,
+    pub artifact: Option<String>,
+    pub gate: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Relation {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Organization {
+    pub name: String,
+    pub description: String,
+    pub members: Vec<Member>,
+    pub gates: Vec<Relation>,
+    pub handoffs: Vec<Relation>,
+    pub rework: Vec<Relation>,
+    pub note: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -407,10 +435,113 @@ impl Library {
         Ok(out)
     }
 
+    /// How a container's skills relate: the pipeline, the gates, the handoffs, the rework.
+    ///
+    /// This is the read that a flat directory of Markdown cannot answer at all. It walks the edge
+    /// table, which `skillc org` is the only thing that writes; a plain bundle has an empty one
+    /// and reports no edges rather than pretending to be an organization.
+    ///
+    /// # Errors
+    /// Fails if the container is absent or does not open.
+    pub fn organization(&self, container: Option<&str>) -> anyhow::Result<Organization> {
+        let bytes = match container {
+            Some(name) => self.find(name)?.0,
+            None => &self.containers.first().context("no containers")?.1,
+        };
+        let entries = Skill::routing_view(bytes).map_err(|e| anyhow::anyhow!("routing: {e}"))?;
+        let s = Skill::open_with(bytes, &self.policy, self.dict.as_ref())
+            .map_err(|e| anyhow::anyhow!("open: {e}"))?;
+
+        // A gate and an artifact live inside a member's subtree, so an endpoint is attributed to
+        // the routing entry whose subtree holds it. Routing roots are the only authority on where
+        // one skill ends and the next begins.
+        let owner = |mut idx: u32| -> String {
+            loop {
+                if let Some(e) = entries.iter().find(|e| e.root == idx) {
+                    return e.name.to_string();
+                }
+                let Some(n) = s.nodes.get(idx as usize) else {
+                    return format!("node {idx}");
+                };
+                if n.parent == u32::MAX || n.parent == idx {
+                    return format!("node {idx}");
+                }
+                idx = n.parent;
+            }
+        };
+
+        let mut org = Organization {
+            name: entries
+                .first()
+                .map_or(String::new(), |e| e.name.to_string()),
+            description: String::new(),
+            members: Vec::new(),
+            gates: Vec::new(),
+            handoffs: Vec::new(),
+            rework: Vec::new(),
+            note: "",
+        };
+        let charter = entries
+            .first()
+            .and_then(|e| s.nodes.get(e.root as usize))
+            .is_some_and(|n| n.role == ROLE_ORG_CHARTER);
+        if charter {
+            org.description = entries[0].description.to_string();
+        }
+        // Pre-order is execution order, because SEQ must run forward. The file's layout is the plan.
+        for e in if charter { &entries[1..] } else { &entries[..] } {
+            org.members.push(Member {
+                name: e.name.to_string(),
+                description: e.description.to_string(),
+                artifact: payload_with_role(&s, e.root, ROLE_ORG_ARTIFACT),
+                gate: payload_with_role(&s, e.root, ROLE_ORG_GATE),
+            });
+        }
+
+        for (i, n) in s.nodes.iter().enumerate() {
+            let src = u32::try_from(i).unwrap_or(0);
+            for e in n.edge_off..n.edge_off.saturating_add(u32::from(n.edge_cnt)) {
+                let Ok(edge) = s.manifest.edge(e) else {
+                    continue;
+                };
+                let pair = Relation {
+                    from: owner(src),
+                    to: owner(edge.dst),
+                };
+                match edge.kind {
+                    EdgeKind::Guards => org.gates.push(pair),
+                    EdgeKind::Needs => org.handoffs.push(pair),
+                    EdgeKind::Cites => org.rework.push(pair),
+                    EdgeKind::Seq | EdgeKind::Alt => {}
+                }
+            }
+        }
+        org.note = if org.gates.is_empty() && org.handoffs.is_empty() {
+            "this container carries no edges: it is a flat bundle, not an organization"
+        } else {
+            "members are listed in execution order; a gate is evaluated before entry, so it runs \
+             ahead of what it gates and a member must not proceed past one that refuses"
+        };
+        Ok(org)
+    }
+
     #[must_use]
     pub fn container_count(&self) -> usize {
         self.containers.len()
     }
+}
+
+/// The first payload under `root` carrying `role`, which is how an artifact and a gate are found:
+/// both are structural children the org compiler placed, not headings anyone wrote.
+fn payload_with_role(s: &Skill<'_>, root: u32, role: u16) -> Option<String> {
+    s.nodes.iter().enumerate().find_map(|(i, n)| {
+        let idx = u32::try_from(i).ok()?;
+        if n.role != role || !in_subtree(s, idx, root) {
+            return None;
+        }
+        let bytes = s.payload(idx).ok()?;
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    })
 }
 
 /// Query tokens worth matching on. Anything shorter than three characters is noise: it matches

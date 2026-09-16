@@ -228,8 +228,52 @@ A file is well-formed only if all of these hold. These are the TLA+ obligations.
 10. Every reserved field is zero.
 
 Invariants 1–6 are graph properties and belong in the model checker; 7–10 are parser properties
-and belong in the fuzzer. Both now exist: `specs/check.sh` runs 13 TLC configurations, six of
-them canaries that must fail, and `scripts/fuzz.sh` runs the bounded parser fuzzer.
+and belong in the fuzzer. Both now exist: `specs/check.sh` runs 18 TLC configurations, 11 of
+which must fail, and `scripts/fuzz.sh` runs the bounded parser fuzzer.
 
 The division is not cosmetic. The fuzzer mutates files and found nothing here; the model checker
 reasons about graphs and found two ways activation could fail to terminate.
+
+
+## 10. An organization is a graph over skills
+
+A bundle says *which* skills share a file. An organization says how they relate, and the five edge
+kinds of §3 are enough to say it: `SEQ` is the delivery line, `NEEDS` the handoff, `GUARDS` the
+approval, `ALT` the interchangeable specialist, `CITES` the rework loop. `skillc org` compiles one
+from a manifest; before it, nothing in the toolchain emitted a single edge, so every container
+ever produced had an empty edge table.
+
+Three invariants from §9 constrain what an org chart may say, and each makes the model *more*
+precise than free-form boxes and arrows would be.
+
+**A gate is a contract** (invariant 5). `GUARDS` sources must be `Contract` nodes, so a member
+that refuses has to carry a contract saying what it refuses. There is nowhere to put a gate that
+is only a label.
+
+**A role needs an artifact, not a role** (invariant 3). `NEEDS` targets only
+`Binding`/`Resource`/`Segment`, so "review depends on implement" is unrepresentable and "review
+needs the diff implement produces" is what gets stored. The format refused the vaguer statement.
+
+**The file's pre-order is the pipeline order** (`SEQ` is forward-only, `SPEC.md` §10.2 and
+`specs/SkillSeq.tla`). Members are topologically sorted at emit time, so reading the routing block
+top to bottom *is* reading the plan. It also means rework cannot be a `SEQ` back-edge — it is
+`CITES`, the only kind permitted to cycle, which is the right answer: a loader obliged to follow
+rework would not terminate.
+
+### What the container cannot see
+
+A gate is evaluated *before entry*, so it runs ahead of what it gates. Two members that gate each
+other can therefore never act — and the container accepts that file. It is not a missed check:
+`GUARDS` sources are gate nodes and `GUARDS` targets are member roots, and those sets never
+overlap, so the obligation relation is acyclic **by construction** and invariant 3a can never fire
+on an organization. `specs/SkillOrg.tla` states both halves and TLC confirms them: the node-level
+check is vacuous here, and a role-level check is exactly strong enough. That check belongs to
+`skillc org`, the layer that knows a gate means a reviewer doing work — the container does not
+hold that premise and should not invent it.
+
+This is §10.7's open question arriving with a use case attached. The spec declined to pin down
+whether reaching a node inside a subtree costs entry to that subtree, on the grounds that
+inventing a rule before the execution model exists is how formats acquire restrictions nobody can
+explain. An organization supplies an execution model, and the answer it gives is *stay out of it*:
+under the strict reading a skill's own precondition contract becomes unsatisfiable, which is the
+commonest `Contract` in the corpus. The model checks that too (`OrgSelfGate.cfg`).

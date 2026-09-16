@@ -1,9 +1,10 @@
 //! The MCP surface over a skill library.
 //!
-//! Three tools, chosen so the transcript shows the format's tier split rather than hiding it:
+//! Four tools, chosen so the transcript shows the format's tier split rather than hiding it:
 //! `skill_search` reads routing planes and no bodies, `skill_load` is the first call that
-//! decompresses and verifies one, and `skill_segments` reports what a skill would execute and
-//! what it declared it needs — which the Markdown it was compiled from cannot say at all.
+//! decompresses and verifies one, `skill_segments` reports what a skill would execute and what it
+//! declared it needs, and `skill_org` reads the edge table — which is the one thing a directory of
+//! Markdown files cannot answer at all, because it has nowhere to put an edge.
 
 use std::sync::Arc;
 
@@ -22,7 +23,11 @@ const INSTRUCTIONS: &str = "\
 A library of agent skills held in `.skill` containers — a binary format in which a skill is a \
 typed graph with per-section BLAKE3 commitments, not a Markdown file.
 
-Call `skill_search` first. It answers from each container's routing plane, which is a contiguous \
+Call `skill_org` first when the library is an organization: it reports the order its members run \
+in, which member gates which, and what each hands on. A gate is evaluated before entry, so work \
+must not proceed past one that refuses. A flat bundle carries no edges and says so.
+
+Call `skill_search` when you need a skill rather than a pipeline. It answers from each container's routing plane, which is a contiguous \
 block at a fixed offset holding only names and descriptions, so it never decompresses or reads a \
 skill body. That is what makes searching a large library cheap: 249 bytes and roughly 180 \
 nanoseconds per skill, flat, measured across corpora from 8,776 to 680,924 skills.
@@ -90,6 +95,42 @@ pub struct Segment {
     pub mem_kib: u32,
     pub cpu_ms: u32,
     pub bytes: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OrgParams {
+    /// Which container to read. Omit for the only one, or the first.
+    #[serde(default)]
+    pub container: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct OrgMember {
+    pub name: String,
+    pub description: String,
+    /// What this member hands on. `NEEDS` edges point here, never at the member.
+    pub artifact: Option<String>,
+    /// What this member refuses. A gate is a Contract, which is what the format requires.
+    pub gate: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct OrgRelation {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct OrgResult {
+    pub name: String,
+    pub description: String,
+    /// In execution order: `SEQ` must run forward in pre-order, so the file's layout is the plan.
+    pub members: Vec<OrgMember>,
+    pub gates: Vec<OrgRelation>,
+    pub handoffs: Vec<OrgRelation>,
+    /// `CITES`, the only edge kind permitted to cycle, and so the only way to send work back.
+    pub rework: Vec<OrgRelation>,
+    pub note: &'static str,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -180,6 +221,51 @@ impl SkillServer {
             bytes: markdown.len(),
             verified: true,
             markdown,
+        }))
+    }
+
+    #[tool(
+        name = "skill_org",
+        description = "Report how a container's skills relate: the order they run in, which \
+                       member gates which, what each hands on, and where work is sent back. A \
+                       gate is evaluated before entry, so do not proceed past one that refuses. \
+                       A container with no edges is a flat bundle and says so."
+    )]
+    /// # Errors
+    /// Fails if the container is absent or does not open.
+    pub fn skill_org(
+        &self,
+        Parameters(p): Parameters<OrgParams>,
+    ) -> Result<Json<OrgResult>, ErrorData> {
+        let org = self
+            .library
+            .organization(p.container.as_deref())
+            .map_err(|e| fail(&e))?;
+        let rel = |v: Vec<crate::library::Relation>| {
+            v.into_iter()
+                .map(|r| OrgRelation {
+                    from: r.from,
+                    to: r.to,
+                })
+                .collect()
+        };
+        Ok(Json(OrgResult {
+            name: org.name,
+            description: org.description,
+            members: org
+                .members
+                .into_iter()
+                .map(|m| OrgMember {
+                    name: m.name,
+                    description: m.description,
+                    artifact: m.artifact,
+                    gate: m.gate,
+                })
+                .collect(),
+            gates: rel(org.gates),
+            handoffs: rel(org.handoffs),
+            rework: rel(org.rework),
+            note: org.note,
         }))
     }
 

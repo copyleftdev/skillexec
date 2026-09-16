@@ -138,3 +138,61 @@ fn literal_block_scalars_keep_their_newlines() {
     assert_eq!(md::parse(src).get("description"), Some("one\ntwo"));
     exact(src);
 }
+
+/// Compiles several sources into one bundle and renders each back out of it.
+///
+/// `render_from` with a non-zero root had no fidelity test: the whole-file `render` was measured
+/// at 100% normalized round-trip across both corpora, but pulling one skill out of a bundle was
+/// only ever asserted not to leak its neighbours. Composing an organization out of an existing
+/// library depends on this being exact, so it is asserted rather than assumed.
+fn bundle_roundtrip(srcs: &[&str]) -> Vec<String> {
+    let docs: Vec<(String, String, md::Document)> = srcs
+        .iter()
+        .enumerate()
+        .map(|(i, src)| {
+            let doc = md::parse(src);
+            let name = doc.get("name").unwrap_or("fixture").to_string();
+            let desc = doc.get("description").unwrap_or("").to_string();
+            assert_eq!(name, format!("s{i}"), "fixtures are named in order");
+            (name, desc, doc)
+        })
+        .collect();
+    let (bytes, _) = skillc::bundle(&docs, skill_format::Profile::default(), None).expect("bundle");
+    let s = Skill::open(&bytes, &TrustPolicy::permissive()).expect("open");
+    s.verify_all().expect("verify");
+
+    let entries = Skill::routing_view(&bytes).expect("routing");
+    entries
+        .iter()
+        .map(|e| skillc::render_from(&s, e.root).expect("render subtree"))
+        .collect()
+}
+
+#[test]
+fn a_skill_rendered_out_of_a_bundle_is_byte_identical_to_its_source() {
+    let srcs = [
+        "---\nname: s0\ndescription: The first.\n---\n\nPreamble.\n\n## When to use\n\nWhen X.\n",
+        "---\nname: s1\ndescription: The second.\n---\n\n##  Two spaces\n\nBody.\n\n```sh\necho hi\n```\n",
+        "---\nname: s2\ndescription: The third.\n---\n\n- item:\n\n  ```python\n  # not a heading\n  x = 1\n  ```\n\nAfter.\n",
+    ];
+    for (i, (got, want)) in bundle_roundtrip(&srcs).iter().zip(srcs).enumerate() {
+        assert_eq!(got, want, "skill {i} differed coming out of the bundle");
+    }
+}
+
+#[test]
+fn a_bundled_skill_renders_the_same_text_as_it_would_alone() {
+    // The stronger claim: bundling changes nothing about a skill's rendered form, so an
+    // organization can be composed out of a library without altering what its members say.
+    let srcs = [
+        "---\nname: s0\ndescription: One.\n---\n\nAlpha.\n",
+        "---\nname: s1\ndescription: Two.\n---\n\n## Heading\n\nBeta.\n",
+    ];
+    for (bundled, src) in bundle_roundtrip(&srcs).iter().zip(srcs) {
+        assert_eq!(
+            bundled,
+            &roundtrip(src),
+            "bundling altered the rendered text"
+        );
+    }
+}

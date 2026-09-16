@@ -13,7 +13,7 @@ corpusctl build --dest repos --out corpus.txt --exclude other-corpus.txt
 corpusctl run --list corpus.txt --out results
 
 ./scripts/fuzz.sh 600 4      # bounded parser fuzzing
-./specs/check.sh             # 13 TLC runs, 6 of them canaries
+./specs/check.sh             # 18 TLC runs, 11 of which must fail
 ```
 
 `--exclude` subtracts another corpus by content hash. That is what makes a held-out corpus
@@ -129,9 +129,11 @@ graph validation and lazy hash verification, not dying at the magic check. The g
 
 ## Model checking
 
-`specs/check.sh` — 13 TLC configurations, 88 s wall, capped at 4 workers and a 4 GB heap, niced,
-per-run timeout, hermetic metadir. **Six are canaries that must fail**; the script exits non-zero
-if one passes, because a suite whose canaries also pass checked nothing.
+`specs/check.sh` — 18 TLC configurations, 96 s wall, capped at 4 workers and a 4 GB heap, niced,
+per-run timeout, hermetic metadir. **Eleven must fail**; the script exits non-zero if one
+passes, because a suite whose canaries also pass checked nothing. (Six are named `*Canary*`; the
+other five are configurations recording a state the validator has moved past, or a question it has
+deliberately left open.)
 
 | Configuration | Expected | What it establishes |
 |---|---|---|
@@ -148,10 +150,16 @@ if one passes, because a suite whose canaries also pass checked nothing.
 | `EdgesFixed.cfg` | holds | with the union check, activation terminates |
 | `SkillGraph.cfg` | holds | tree and obligations composed, 15,136,875 states |
 | `GraphWithDescent.cfg` | violated | open question: an obligation into an ancestor (`SPEC.md` §10.7) |
+| `SkillOrg.cfg` | holds | the container accepts every organization, and a role-level check admits exactly the ones that can act |
+| `OrgCanaryContainer.cfg` | violated | **the node-level check cannot catch a circular approval chain** |
+| `OrgCanaryNoCycleCheck.cfg` | violated | without the compiler's check a member is never enterable |
+| `OrgPermissiveGates.cfg` | holds | under the permissive reading of a gate there is no deadlock to catch |
+| `OrgSelfGate.cfg` | violated | the strict reading cannot represent an ordinary precondition contract |
 
 ### What it found that nothing else did
 
-Two defects, both written up in `SPEC.md` §10.6.
+Two defects, both written up in `SPEC.md` §10.6, and one thing the implementation was about to get
+wrong (§10.10).
 
 **`ALT` was never checked for cycles.** `alt = {⟨1,2⟩, ⟨2,1⟩}` — two nodes falling back to each
 other forever — was a valid file. **And checking each relation separately is strictly weaker than
@@ -162,6 +170,13 @@ Neither is a byte mutation. Both are graphs the *writer emits happily*, which is
 46 million fuzz inputs and 24 hostile-corpus cases missed them — a fuzzer mutates files, and
 these are defects in what counts as a valid graph. The division of labour is real: the fuzzer
 found nothing here, and the model checker found nothing the fuzzer was looking for.
+
+It also stopped a wrong fix. A cross-skill gate cycle compiles, and the first read of that was
+"the validator has a hole". Modelling it first showed the opposite: the obligation relation over an
+organization is acyclic by construction, so no strengthening of the container's check could catch
+the deadlock, and the natural candidate — counting containment as an obligation — would have made
+an ordinary precondition contract illegal. The check moved to the compiler, and `validate.rs` was
+not touched. See `SPEC.md` §10.10.
 
 It also corrected the spec. `SPEC.md` §4.4 claimed the tree invariant was proven by one
 comparison per node. It is not; `parent = ⟨0,1,1,1,2⟩` has every parent preceding its child and a
@@ -412,9 +427,58 @@ Choosing among the forty reads 13,954 bytes and decompresses nothing. The 61% is
 `Compact`: the personas share a house style, and content-addressed payloads collapse the overlap
 before zstd sees it.
 
+## Organizations
+
+`skillc org` compiles a manifest of members and relations into one container. The flagship example
+(`examples/high-performance-engineering.toml`) is eight real skills resolved by name out of the
+192-skill library — Beck-style story shaping through to Google SRE — wired into a delivery line
+with three gates that are allowed to say no.
+
+```
+skillc org examples/high-performance-engineering.toml hpe.skill \
+    --from ~/.local/share/skillexec/library.skill
+```
+
+| | flat bundle | organization |
+|---|---|---|
+| same eight skills | 34,964 B | 35,926 B |
+| nodes | 240 | 249 |
+| what it can answer | which skills are here | who runs when, who gates whom, what is handed on |
+
+**The whole organization costs 962 bytes**: one charter, five artifacts, three gates, and 20
+edges. Nine nodes. That is what it takes to turn a bag of skills into something a harness can
+execute in order.
+
+`skillc plan` reads it back out of the container — pipeline, gates, handoffs and rework — and
+`skill_org` serves the same thing over MCP. Run against a flat bundle, both report no edges rather
+than pretending; the edge table is the one part of this format a directory of Markdown has no
+place to put.
+
+### The check that matters, and where it had to live
+
+A gate is evaluated *before entry* (`GRAPH.md` §3), so a gate runs ahead of what it gates. Two
+members that gate each other can never act:
+
+```
+$ skillc org deadlock.toml out.skill
+skillc: circular approval chain: review waits on perf waits on review
+        — no member can act first, so the organization cannot ship
+```
+
+Nothing is written. The container would have accepted that file, and is right to: `GUARDS` sources
+are gate nodes and targets are member roots, so the node-level obligation relation is acyclic by
+construction and the §10.6 union check can never fire on an organization. `specs/SkillOrg.tla`
+proves both halves — the container check is vacuous here, the role-level check is sufficient — and
+its canaries fail as designed, including one showing that the opposite reading would make an
+ordinary precondition contract unsatisfiable.
+
+Writing the example is what found the bug. The first draft had `review` gating `implement`, which
+reads naturally and says something false: that no code may be written until it has been reviewed.
+The compiler rejected it as a cycle. A post-hoc review gates the *next* stage.
+
 ## Serving a library
 
-`crates/skill-mcp` exposes a library of containers over MCP with three tools, shaped so the
+`crates/skill-mcp` exposes a library of containers over MCP with four tools, shaped so the
 transcript shows the tier split rather than hiding it:
 
 | Tool | What it touches |
@@ -422,6 +486,7 @@ transcript shows the tier split rather than hiding it:
 | `skill_search` | routing planes only — no body, no decompression |
 | `skill_load` | the first read of a body, verified against its commitment before returning |
 | `skill_segments` | ABI, declared capabilities and limits for each executable fragment |
+| `skill_org` | the edge table: order, gates, handoffs, rework |
 
 The split is the point. A skills *directory* requires every description in the agent's context
 before it can choose; a library answers "which of these applies" from a contiguous block at a
@@ -530,6 +595,8 @@ unbounded fan-out during this work made it unresponsive; nothing here is theoret
 | Command | Peak RSS | Wall | Bounded by |
 |---|---|---|---|
 | `cargo test --workspace` | 168 MB | 0.8 s | — |
+| `skillc org` (8 members, `--from` a 192-skill library) | 17 MB | 0.06 s | manifest size |
+| `skillc plan` | 13 MB | <0.01 s | container size |
 | `scripts/fuzz.sh` | 50 MB | `--seconds` | iterations, wall clock, `--max-bytes` |
 | `skill-eval` (192 skills × 11 weights) | 76 MB | 2.7 s | library size |
 | `skillc cas` (192 skills) | 12 MB | <1 s | `--limit` |

@@ -1,0 +1,105 @@
+# A high-performance engineering organization, in one .skill file.
+#
+# Every member is a real skill from the 192-skill library, resolved by name:
+#
+#   skillc org examples/high-performance-engineering.toml hpe.skill \
+#       --from ~/.local/share/skillexec/library.skill
+#
+# Two things about the shape are worth reading before editing it.
+#
+# A GATE IS EVALUATED BEFORE ENTRY (GRAPH.md §3), so a gate runs ahead of what it gates. `review`
+# does its work after `implement`, and therefore gates `operate` — the stage that must not begin
+# until the review has passed. Pointing it back at `implement` would say something different and
+# false: that no code may be written until it has been reviewed. The compiler refuses a ring of
+# those, because an organization whose approvals form a loop can never act.
+#
+# SEQ MUST RUN FORWARD in pre-order, so rework cannot be a `seq` back-edge. It is `cites`, the
+# only edge kind permitted to cycle — which is the right answer, because a loader obliged to
+# follow rework would not terminate.
+
+name        = "high-performance-engineering"
+description = "Ship fast without shipping regressions: shape, design, implement, test, operate — with three gates that are allowed to say no."
+
+# ---------------------------------------------------------------- the delivery line
+
+[[member]]
+id       = "shape"
+skill    = "story-testability"
+artifact = "A story whose acceptance criteria a developer can pick up without asking a question."
+
+[[member]]
+id       = "design"
+skill    = "fielding-rest"
+artifact = "An interface other teams can call, and the constraints it is allowed to break."
+
+[[member]]
+id       = "implement"
+skill    = "matsakis-ownership-mastery"
+artifact = "A diff that compiles, with the invariants it relies on written down."
+
+[[member]]
+id       = "test"
+skill    = "hughes-property-based-testing"
+artifact = "Properties that fail on the bug, not examples that pass on the fix."
+
+[[member]]
+id       = "operate"
+skill    = "google-sre"
+artifact = "An error budget, an alert that fires on symptoms, and an on-call rotation that is not miserable."
+
+# ---------------------------------------------------------------- the gates
+
+[[member]]
+id    = "review"
+skill = "code-review"
+gate  = "Refuses a diff that changes behaviour without a test, or that leaves an invariant undocumented."
+
+[[member]]
+id    = "perf"
+skill = "tene-latency-measurement"
+gate  = "Refuses a p99 claim backed by an average, a coordinated-omission benchmark, or no measurement at all."
+
+[[member]]
+id    = "chaos"
+skill = "netflix-chaos-engineering"
+gate  = "Refuses a launch whose failure modes have never been exercised on purpose."
+
+[graph]
+
+# The line runs in this order, and the file is laid out in this order because SEQ says so.
+seq = [
+    ["shape",     "design"],
+    ["design",    "implement"],
+    ["implement", "test"],
+    ["test",      "review"],
+    ["review",    "perf"],
+    ["perf",      "chaos"],
+    ["chaos",     "operate"],
+]
+
+# Each stage waits on the artifact before it, not on the stage before it. NEEDS targets a Binding,
+# which is the format's way of saying a dependency is a thing you can hold, not a person.
+needs = [
+    ["design",    "shape"],
+    ["implement", "design"],
+    ["test",      "implement"],
+    ["review",    "implement"],
+    ["perf",      "test"],
+    ["chaos",     "test"],
+    ["operate",   "implement"],
+]
+
+# Three gates, all pointing forward at what they hold up. `operate` cannot begin until review,
+# performance and chaos have each had the chance to refuse.
+guards = [
+    ["review", "operate"],
+    ["perf",   "operate"],
+    ["chaos",  "operate"],
+]
+
+# Rework. SEQ cannot point backwards; CITES can, and is the only kind allowed to cycle.
+cites = [
+    ["review", "implement"],
+    ["perf",   "design"],
+    ["chaos",  "design"],
+]

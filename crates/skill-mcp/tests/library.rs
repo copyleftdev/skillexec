@@ -165,3 +165,103 @@ fn a_rare_term_outranks_common_ones() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Compiles the two-role organization the org tests use, so the MCP surface is checked against
+/// bytes `skillc org` actually produces rather than a hand-built fixture that could drift.
+fn org_at(dir: &Path) -> PathBuf {
+    const MANIFEST: &str = r#"
+name = "two-role"
+description = "A pipeline with one gate."
+[[member]]
+id = "implement"
+skill = "implement"
+artifact = "A diff."
+[[member]]
+id = "review"
+skill = "review"
+gate = "Refuses a diff that changes behaviour without a test."
+[graph]
+seq    = [["implement", "review"]]
+needs  = [["review", "implement"]]
+cites  = [["review", "implement"]]
+"#;
+    let m = skillc::org::parse(MANIFEST).expect("manifest");
+    let docs = m
+        .members
+        .iter()
+        .map(|x| {
+            let src = format!(
+                "---\nname: {}\ndescription: The {} role.\n---\n\nWhat it does.\n",
+                x.id, x.id
+            );
+            (x.id.clone(), skillc::md::parse(&src))
+        })
+        .collect();
+    let bytes = skillc::org::compile(
+        &m,
+        &docs,
+        skill_format::Profile::default(),
+        None,
+        Vec::new(),
+    )
+    .expect("compile organization");
+    std::fs::create_dir_all(dir).expect("dir");
+    let p = dir.join("org.skill");
+    std::fs::write(&p, bytes).expect("write");
+    p
+}
+
+#[test]
+fn the_organization_reports_its_order_its_gates_and_its_rework() {
+    let dir = std::env::temp_dir().join(format!("skillmcp-org-{}", std::process::id()));
+    let path = org_at(&dir);
+    let lib = library::Library::open(&path, None).expect("open");
+
+    let org = lib.organization(None).expect("organization");
+    assert_eq!(org.name, "two-role");
+    assert_eq!(org.description, "A pipeline with one gate.");
+    assert_eq!(
+        org.members
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
+        ["implement", "review"],
+        "members come back in execution order, which is the file's own order"
+    );
+    assert_eq!(org.members[0].artifact.as_deref(), Some("A diff."));
+    assert!(org.members[0].gate.is_none(), "implement refuses nothing");
+    assert!(
+        org.members[1]
+            .gate
+            .as_deref()
+            .is_some_and(|g| g.contains("without a test")),
+        "a gate must say what it refuses"
+    );
+    assert_eq!(org.handoffs.len(), 1);
+    assert_eq!(org.handoffs[0].from, "review");
+    assert_eq!(org.handoffs[0].to, "implement");
+    assert_eq!(org.rework.len(), 1, "CITES carries the rework loop");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_flat_bundle_says_it_is_not_an_organization() {
+    let dir = std::env::temp_dir().join(format!("skillmcp-flat-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = bundle_at(&dir);
+    let lib = library::Library::open(&path, None).expect("open");
+
+    let org = lib.organization(None).expect("organization");
+    assert!(org.gates.is_empty() && org.handoffs.is_empty());
+    assert!(
+        org.note.contains("flat bundle"),
+        "a bundle must not be reported as an organization: {}",
+        org.note
+    );
+    assert_eq!(
+        org.members.len(),
+        3,
+        "with no charter every routing entry is a member"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

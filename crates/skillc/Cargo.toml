@@ -10,6 +10,8 @@ description = "Compiles SKILL.md into the .skill binary container, and renders i
 skill-format = { path = "../skill-format" }
 blake3 = "1"
 skill-embed = { path = "../skill-embed" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 
 [lints]
 workspace = true

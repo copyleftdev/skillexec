@@ -596,3 +596,46 @@ and a one-character name is indistinguishable from a one-skill count. Two layout
 confused for each other must not be allowed to meet, so `ver_major` is `2` and a v1 reader
 rejects a v2 file outright rather than misreading it. Every file in the corpus is regenerable
 from its source, so nothing is lost.
+
+
+### 10.10 The obligation check cannot see an organization
+
+`skillc org` compiles several skills into one container and wires them with edges: `SEQ` for the
+delivery line, `NEEDS` for the handoff, `GUARDS` for the approval. §10.6 established that the
+validator checks `SEQ ∪ GUARDS ∪ NEEDS ∪ ALT` as one graph so that activation terminates. It does.
+It also cannot fire.
+
+A gate must originate from a `Contract` (§9 invariant 5), so the org compiler places one inside
+the member that refuses; a gate targets the member root it holds up. **Sources are gate nodes and
+targets are member roots, and those two sets never overlap** — so the obligation relation over an
+organization is acyclic by construction, for every organization that can be written. Two members
+that gate each other compile, verify, and can never act, because a gate is evaluated *before
+entry* and each waits on the other.
+
+This is not §10.6 repeating itself. There the defect was a check that was too weak; here the check
+is correct and the cycle is somewhere it cannot look. The deadlock is a property of a premise the
+container does not hold: that satisfying a gate means the member owning it has done work. Nothing
+in the node or edge tables says that, and the only field that gestures at it is `role`, which §2
+makes descriptive and never load-bearing.
+
+So the check belongs to the layer that holds the premise, and `skillc org` refuses a circular
+approval chain by name. `specs/SkillOrg.tla` states both halves and TLC confirms them over every
+organization of four members: the node-level check accepts all of them, and a role-level check
+admits exactly the ones in which every member can act.
+
+The generalisation is the useful part: **a composition invariant cannot be checked by the format
+it composes.** A container that accepted only organizations that could ship would have to know
+what an organization is, and that is a second format wearing the first one's bytes.
+
+
+### 10.7 update: the open question, answered for one caller
+
+§10.7 left open whether an obligation that points into a subtree costs entry to that subtree, on
+the grounds that inventing a rule before an execution model exists is how formats acquire
+restrictions nobody can explain later. An organization is an execution model, and it says: do not
+adopt the strict reading. Under it, a skill whose own `Contract` gates its own root becomes
+unsatisfiable — a definition with no grounded value rather than a loop a loader spins on — and
+that is the commonest contract shape in the corpus, the ordinary precondition. `OrgSelfGate.cfg`
+checks it.
+
+§10.7 therefore stays open at container level, deliberately, with one reading now ruled out.

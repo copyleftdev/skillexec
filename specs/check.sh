@@ -58,5 +58,12 @@ echo "SkillGraph -- the tree and the obligations, joined"
 expect_holds    SkillGraph.cfg             SkillGraph.tla "composed claim holds"
 expect_violated GraphWithDescent.cfg       SkillGraph.tla "obligation into an ancestor cycles with descent (open)"
 
+echo "SkillOrg -- can the container see an organization that cannot ship?"
+expect_holds    SkillOrg.cfg               SkillOrg.tla   "container accepts every org; role-level check is sufficient"
+expect_violated OrgCanaryContainer.cfg     SkillOrg.tla   "node-level check cannot catch a circular approval chain"
+expect_violated OrgCanaryNoCycleCheck.cfg  SkillOrg.tla   "without the compiler check, a role is never enterable"
+expect_holds    OrgPermissiveGates.cfg     SkillOrg.tla   "under the permissive reading there is no deadlock to catch"
+expect_violated OrgSelfGate.cfg            SkillOrg.tla   "the strict reading cannot represent a self-guarding precondition"
+
 echo
 echo "specs passed"

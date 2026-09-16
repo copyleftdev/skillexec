@@ -87,6 +87,15 @@ fn main() {
             let embed = args.iter().any(|a| a == "--embed");
             make_bundle(list, out, dict.as_ref(), embed, &args);
         }
+        Some("org") => {
+            let manifest = args.get(1).map_or("org.toml", String::as_str);
+            let out = args.get(2).map_or("org.skill", String::as_str);
+            let dict = flag(&args, "--dict")
+                .map(|p| Dictionary::new(&std::fs::read(p).expect("read dictionary")));
+            let embed = args.iter().any(|a| a == "--embed");
+            make_org(manifest, out, dict.as_ref(), embed, &args);
+        }
+        Some("plan") => plan(args.get(1).map_or("org.skill", String::as_str)),
         Some("dict") => {
             let list = args.get(1).map_or("-", String::as_str);
             let out = args.get(2).map_or("corpus.dict", String::as_str);
@@ -95,7 +104,7 @@ fn main() {
         }
         Some(path) => one(Path::new(path)),
         None => eprintln!(
-            "usage: skillc <SKILL.md>\n       skillc corpus <list> [limit] [--profile P] [--dict F]\n       skillc route  <list> [--profile P] [--dict F]\n       skillc roles  <list>\n       skillc cas    <list>\n       skillc dict   <list> <out.dict> [max-bytes]"
+            "usage: skillc <SKILL.md>\n       skillc corpus <list> [limit] [--profile P] [--dict F]\n       skillc route  <list> [--profile P] [--dict F]\n       skillc roles  <list>\n       skillc cas    <list>\n       skillc dict   <list> <out.dict> [max-bytes]\n       skillc bundle <list> [out.skill] [--dict F] [--embed]\n       skillc org    <manifest.toml> [out.skill] [--from F] [--dict F] [--embed]\n       skillc plan   <file.skill>\n       skillc show   <file.skill> [--dict F]"
         ),
     }
 }
@@ -633,4 +642,171 @@ fn norm(s: &str) -> String {
         .join("\n")
         .trim_end()
         .to_string()
+}
+
+/// Compiles an organization: several skills in one container, wired into a graph.
+///
+/// A member's `skill` is a path on disk, or a name to resolve out of an existing container given
+/// with `--from`. The library route renders the member's subtree back to Markdown and recompiles
+/// it, which is byte-exact (`crates/skillc/tests/roundtrip.rs`) but does not carry the original
+/// publisher's signature: these are new bytes over a new manifest.
+fn make_org(manifest: &str, out: &str, dict: Option<&Dictionary>, embed: bool, args: &[String]) {
+    let src = std::fs::read_to_string(manifest).expect("read manifest");
+    let m = skillc::org::parse(&src).unwrap_or_else(|e| fail(&e.to_string()));
+
+    let library = flag(args, "--from").map(|p| std::fs::read(p).expect("read library"));
+    let mut docs = std::collections::BTreeMap::new();
+    for member in &m.members {
+        let text = match &library {
+            Some(bytes) => from_library(bytes, &member.skill, dict),
+            None => std::fs::read_to_string(&member.skill)
+                .unwrap_or_else(|e| fail(&format!("{}: {e}", member.skill))),
+        };
+        docs.insert(member.id.clone(), md::parse(&text));
+    }
+
+    // Routing entry 0 is the organization, so its vector comes first or the counts disagree.
+    let vectors = if embed {
+        let mut e = skill_embed::Embedder::new().expect("embedding model");
+        let mut texts = vec![skill_embed::routing_text(&m.name, &m.description)];
+        let plan = m.plan().unwrap_or_else(|e| fail(&e.to_string()));
+        for id in &plan.order {
+            let d = &docs[id];
+            texts.push(skill_embed::routing_text(
+                d.get("name").unwrap_or(id),
+                d.get("description").unwrap_or(""),
+            ));
+        }
+        e.embed(&texts).expect("embed")
+    } else {
+        Vec::new()
+    };
+
+    let bytes = skillc::org::compile(&m, &docs, Profile::Compact, dict, vectors)
+        .unwrap_or_else(|e| fail(&e.to_string()));
+    std::fs::write(out, &bytes).expect("write organization");
+
+    let plan = m.plan().expect("already planned");
+    println!("organization     {}", m.name);
+    println!("members          {}", m.members.len());
+    println!("gates            {}", plan.gates.len());
+    println!("size             {} B", bytes.len());
+    println!("\npipeline:");
+    for (i, id) in plan.order.iter().enumerate() {
+        println!("  {:>2}. {id}", i + 1);
+    }
+    if !plan.gates.is_empty() {
+        println!("\ngates:");
+        for (g, t) in &plan.gates {
+            println!("  {g} gates {t}");
+        }
+    }
+}
+
+/// Pulls one skill out of a container by name, verifying its body before rendering it.
+fn from_library(bytes: &[u8], name: &str, dict: Option<&Dictionary>) -> String {
+    let entries = Skill::routing_view(bytes).expect("routing");
+    let Some(entry) = entries.iter().find(|e| e.name == name) else {
+        fail(&format!("`{name}` is not in the library"))
+    };
+    let root = entry.root;
+    let s = Skill::open_with(bytes, &TrustPolicy::permissive(), dict).expect("open library");
+    s.verified_payload(root).expect("verify member");
+    render::render_from(&s, root).expect("render member")
+}
+
+/// Reports the order an organization runs in, and what each gate refuses.
+///
+/// Reads the edge table, which is the only part of a container that says how its skills relate;
+/// a flat bundle has an empty one and reports as such rather than pretending to be an org.
+fn plan(path: &str) {
+    let bytes = std::fs::read(path).expect("read container");
+    let entries = Skill::routing_view(&bytes).expect("routing");
+    let s = Skill::open(&bytes, &TrustPolicy::permissive()).expect("open");
+
+    let name_of = |idx: u32| -> String {
+        entries
+            .iter()
+            .find(|e| e.root == idx)
+            .map_or_else(|| format!("node {idx}"), |e| e.name.to_string())
+    };
+    // A gate and an artifact live inside a member's subtree, so an edge endpoint is attributed to
+    // the routing entry whose subtree contains it -- the only authority on skill boundaries.
+    let owner = |mut idx: u32| -> String {
+        loop {
+            if let Some(e) = entries.iter().find(|e| e.root == idx) {
+                return e.name.to_string();
+            }
+            let p = s.nodes[idx as usize].parent;
+            if p == u32::MAX || p == idx {
+                return name_of(idx);
+            }
+            idx = p;
+        }
+    };
+
+    let mut seq = Vec::new();
+    let mut gates = Vec::new();
+    let mut needs = Vec::new();
+    let mut cites = Vec::new();
+    for (i, n) in s.nodes.iter().enumerate() {
+        for e in n.edge_off..n.edge_off + u32::from(n.edge_cnt) {
+            let edge = s.manifest.edge(e).expect("edge");
+            let (src, dst) = (owner(i as u32), owner(edge.dst));
+            match edge.kind {
+                skill_format::EdgeKind::Seq => seq.push((src, dst)),
+                skill_format::EdgeKind::Guards => gates.push((src, dst)),
+                skill_format::EdgeKind::Needs => needs.push((src, dst)),
+                skill_format::EdgeKind::Cites => cites.push((src, dst)),
+                skill_format::EdgeKind::Alt => {}
+            }
+        }
+    }
+
+    // A charter is entry 0 and is not itself a member; a flat bundle has no charter and every
+    // entry is a skill. Telling them apart is what the role is for.
+    let charter = s.nodes[entries[0].root as usize].role == classify::ROLE_ORG_CHARTER;
+    let members = if charter { &entries[1..] } else { &entries[..] };
+
+    println!("organization     {}", entries[0].name);
+    if charter {
+        println!("{}", entries[0].description);
+    }
+    println!("\nmembers          {}", members.len());
+    if seq.is_empty() && gates.is_empty() {
+        println!("\nno edges: this is a flat bundle, not an organization");
+        return;
+    }
+    // Pre-order is the pipeline order, because SEQ must run forward. The file's layout is the plan.
+    println!("\npipeline (file order is execution order, because SEQ runs forward):");
+    for (i, e) in members.iter().enumerate() {
+        println!("  {:>2}. {:<28} {}", i + 1, e.name, truncate(e.description));
+    }
+    if !gates.is_empty() {
+        println!("\ngates (evaluated before entry):");
+        for (g, t) in &gates {
+            println!("  {g} gates {t}");
+        }
+    }
+    if !needs.is_empty() {
+        println!("\nhandoffs:");
+        for (a, z) in &needs {
+            println!("  {a} needs the artifact of {z}");
+        }
+    }
+    if !cites.is_empty() {
+        println!("\nrework (CITES, the only kind that may cycle):");
+        for (a, z) in &cites {
+            println!("  {a} sends it back to {z}");
+        }
+    }
+}
+
+fn truncate(s: &str) -> String {
+    s.chars().take(64).collect()
+}
+
+fn fail(msg: &str) -> ! {
+    eprintln!("skillc: {msg}");
+    std::process::exit(2)
 }

@@ -10,20 +10,22 @@ verified graph with executable segments.
   that writing the implementation forced back into the spec (§10)
 - `docs/RESULTS.md` — every measured number, including the ones that went against the design
 - `crates/skill-format` — reference reader, validator and canonical writer (`forbid(unsafe)`)
-- `crates/skillc` — `SKILL.md` → `.skill` compiler, and the renderer that proves the round-trip
+- `crates/skillc` — `SKILL.md` → `.skill` compiler, the renderer that proves the round-trip, and
+  `skillc org`, which composes many skills into one container wired as a graph
 - `crates/skill-run` — capability-gated, resource-bounded wasm executor for segments
 - `crates/skill-mcp` — MCP server over a library of containers: hybrid lexical + semantic
-  routing-plane search, lazy verified loading, segment capability disclosure
+  routing-plane search, lazy verified loading, segment capability disclosure, organization graph
 - `crates/skill-embed` — sentence embeddings for routing planes (ONNX MiniLM, 384 dims)
 - `crates/corpusctl` — corpus assembly: supervised clones, pruning, BLAKE3 dedup, experiment runs
 - `eval/queries.tsv` — 49 labelled queries; `skill-eval` sweeps the ranking weight against them
 - `specs/` — TLA+ models of the graph invariants, with canaries that must fail
+- `examples/high-performance-engineering.toml` — eight real skills compiled into one organization
 
 ```sh
 ./scripts/gate.sh                    # fmt, clippy -D warnings, tests, 5s fuzz, spec agreement
 ./scripts/fuzz.sh 600 4              # long fuzz, capped at one core and 2G under systemd
 cargo run --example dump_minimal     # the spec's worked example, regenerated
-./specs/check.sh                     # 13 TLC runs, 6 of them canaries, ~90s
+./specs/check.sh                     # 18 TLC runs, 11 of which must fail, ~90s
 
 # assemble a corpus and run every experiment against it
 corpusctl clone --list repos.tsv --dest repos --jobs 8 --budget-gb 40
@@ -34,8 +36,12 @@ corpusctl run   --list corpus.txt --out results
 skillc bundle <list-of-SKILL.md> personas.skill --embed
 skillc show   personas.skill
 
+# or an organization: the same skills, plus who runs when and who is allowed to refuse
+skillc org  examples/high-performance-engineering.toml hpe.skill --from personas.skill
+skillc plan hpe.skill
+
 # serve that library to an agent over MCP
-SKILL_LIBRARY=personas.skill skill-mcp
+SKILL_LIBRARY=hpe.skill skill-mcp
 
 # or drive one experiment directly
 skillc roles  <list>    # does the heading taxonomy generalise?
@@ -52,6 +58,12 @@ The heading taxonomy is the part that does *not* hold up: **40.6% of headings re
 corpus it was fitted to, 26.1% on the held-out one**, with a long multilingual tail. Nothing
 breaks, because role never reaches the dispatch path — which is the measurement that justifies
 that separation rather than a claim about it.
+
+An **organization** is eight of those skills in one 36 KB file, wired with the format's own edge
+kinds: a delivery line, three gates that may refuse, and rework loops. The graph costs **962 bytes**
+over bundling the same skills flat, and a circular approval chain does not compile — a check that
+had to live in the compiler, because TLC shows the container accepts every organization ever
+written (`specs/SkillOrg.tla`, `SPEC.md` §10.10).
 
 46M fuzz inputs, zero panics. TLC proves the validator's single forward pass equivalent to the
 semantic tree invariants over every five-node graph, and found two ways activation could fail to

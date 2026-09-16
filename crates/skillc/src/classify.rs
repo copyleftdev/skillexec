@@ -26,6 +26,20 @@ pub const ROLE_PRINCIPLE: u16 = 17;
 pub const ROLE_FENCE: u16 = 100;
 pub const ROLE_FENCE_UNCLOSED: u16 = 101;
 
+// Organizational roles, 200+. A fresh decade because these are not authored vocabulary and no
+// heading ever produces them: `skillc org` assigns them structurally when it composes several
+// skills into one organization. Role is hashed into the signed subtree commitment and breaks
+// canonical ordering ties, so a number is chosen once and never reused.
+
+/// The organization itself: the manifest's name and charter, routing entry 0.
+pub const ROLE_ORG_CHARTER: u16 = 200;
+/// A member's root — the node a routing entry points at.
+pub const ROLE_ORG_MEMBER: u16 = 201;
+/// What a member hands on. A `Binding`, because that is what `NEEDS` is allowed to target.
+pub const ROLE_ORG_ARTIFACT: u16 = 202;
+/// What a member refuses on. A `Contract`, because that is what `GUARDS` must originate from.
+pub const ROLE_ORG_GATE: u16 = 203;
+
 #[must_use]
 pub fn role_name(role: u16) -> &'static str {
     match role {
@@ -44,6 +58,10 @@ pub fn role_name(role: u16) -> &'static str {
         ROLE_APPLICABILITY => "applicability",
         ROLE_TOOLS => "tools",
         ROLE_PRINCIPLE => "principle",
+        ROLE_ORG_CHARTER => "org-charter",
+        ROLE_ORG_MEMBER => "org-member",
+        ROLE_ORG_ARTIFACT => "org-artifact",
+        ROLE_ORG_GATE => "org-gate",
         _ => "other",
     }
 }
