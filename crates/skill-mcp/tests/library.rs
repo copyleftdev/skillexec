@@ -103,3 +103,65 @@ fn segments_report_what_was_declared_and_nothing_more() {
     assert_eq!((s.mem_kib, s.cpu_ms), (1024, 250));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_rare_term_outranks_common_ones() {
+    // The live failure this encodes: "how do I make this UI less aggressive" ranked three
+    // MCP-authoring skills above the one skill whose description says "aggressive".
+    //
+    // The corpus has to be big enough for the fix to mean anything. Ranking by inverse document
+    // frequency says a term is worth what it rules out, and in a three-skill library "make" rules
+    // out exactly as much as "aggressive" does. It is common words in a real library that the
+    // weighting is there to discount, so the fixture has to contain some.
+    let dir = std::env::temp_dir().join(format!("skillmcp-rank-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut b = Builder::bundle();
+    let add = |b: &mut Builder, name: &str, desc: &str| {
+        let root = b.add_skill(name, desc);
+        b.child(
+            root,
+            Kind::Prose,
+            Tier::Body,
+            1,
+            Some("b"),
+            b"body\n".to_vec(),
+            1,
+        );
+    };
+    add(
+        &mut b,
+        "quieter",
+        "Tones down visually aggressive or overstimulating designs.",
+    );
+    for i in 0..12 {
+        add(
+            &mut b,
+            &format!("build-thing-{i}"),
+            "Use when the user wants to make this, or asks how to make an integration with UI.",
+        );
+    }
+    let path = dir.join("rank.skill");
+    std::fs::write(&path, b.build().unwrap()).unwrap();
+
+    let lib = library::Library::open(&path, None).unwrap();
+    let hits = lib
+        .search("how do I make this UI less aggressive", 5)
+        .unwrap();
+    assert_eq!(
+        hits[0].name,
+        "quieter",
+        "got {:?}",
+        hits.iter().map(|h| &h.name).collect::<Vec<_>>()
+    );
+
+    // A query of only short tokens reduces to no usable terms, and is treated as no query at
+    // all rather than being given a fabricated ranking. Same answer as an empty query.
+    let stopwords = lib.search("do I a an", 5).unwrap();
+    let empty = lib.search("", 5).unwrap();
+    assert_eq!(
+        stopwords.iter().map(|h| &h.name).collect::<Vec<_>>(),
+        empty.iter().map(|h| &h.name).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

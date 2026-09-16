@@ -103,31 +103,79 @@ impl Library {
         Ok(out)
     }
 
-    /// Substring match over names and descriptions.
+    /// Ranks skills by how much each matching query term actually distinguishes them.
     ///
-    /// This is deliberately not a semantic search. It reports what the routing plane literally
-    /// says, so that a miss means the corpus does not describe the thing rather than that a
-    /// model failed to connect two words.
+    /// This is not semantic search: it matches words the routing plane literally contains, so a
+    /// miss means the library does not describe the thing rather than that a model failed to
+    /// connect two ideas.
+    ///
+    /// It took two attempts to get the ranking honest. Matching substrings let `i` hit
+    /// "interactive" and `do` hit "dropdown", so stopwords buried the signal. Matching whole
+    /// words fixed that and still tied "make" with "aggressive" — a term is only worth what it
+    /// rules out, and "make" rules out nothing. Terms are now weighted by inverse document
+    /// frequency over the library itself, which is the cheap correct answer at 200 or 680,000
+    /// skills alike.
     ///
     /// # Errors
     /// Fails if a container's routing block is malformed.
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<Hit>> {
-        let terms: Vec<String> = query
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .filter(|t| !t.is_empty())
+        let terms = terms_of(query);
+        let catalogue = self.catalogue()?;
+        // A query that reduces to no usable terms is no query. Listing is honest; inventing a
+        // ranking out of stopwords is not.
+        if terms.is_empty() {
+            let mut all = catalogue;
+            all.sort_by(|a, b| a.name.cmp(&b.name));
+            return Ok(all.into_iter().take(limit).collect());
+        }
+
+        // A library that large would not fit in memory anyway; the cast is bounded in practice.
+        #[allow(clippy::cast_precision_loss)]
+        let total = catalogue.len().max(1) as f64;
+        let docs: Vec<(Vec<String>, Vec<String>)> = catalogue
+            .iter()
+            .map(|h| (words_of(&h.name), words_of(&h.description)))
             .collect();
-        let mut hits: Vec<(usize, Hit)> = Vec::new();
-        for h in self.catalogue()? {
-            let hay = format!("{} {}", h.name, h.description).to_lowercase();
-            let score = terms.iter().filter(|t| hay.contains(t.as_str())).count();
-            if terms.is_empty() || score > 0 {
-                hits.push((score, h));
+
+        // How many skills contain each term at all. A term in half the library says almost
+        // nothing about which half the caller wants.
+        let weights: Vec<f64> = terms
+            .iter()
+            .map(|t| {
+                #[allow(clippy::cast_precision_loss)]
+                let df = docs
+                    .iter()
+                    .filter(|(n, d)| hits_word(n, t) || hits_word(d, t))
+                    .count() as f64;
+                if df == 0.0 {
+                    0.0
+                } else {
+                    (total / df).ln().max(0.0) + 0.1
+                }
+            })
+            .collect();
+
+        let mut scored: Vec<(f64, Hit)> = Vec::new();
+        for (h, (name_words, desc_words)) in catalogue.into_iter().zip(&docs) {
+            let mut score = 0.0;
+            for (t, w) in terms.iter().zip(&weights) {
+                // A name is a claim; a description is prose that can brush against any word.
+                if hits_word(name_words, t) {
+                    score += 3.0 * w;
+                } else if hits_word(desc_words, t) {
+                    score += *w;
+                }
+            }
+            if score > 0.0 {
+                scored.push((score, h));
             }
         }
-        // Ties break on name, so repeated calls give the same answer.
-        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
-        Ok(hits.into_iter().take(limit).map(|(_, h)| h).collect())
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.name.cmp(&b.1.name))
+        });
+        Ok(scored.into_iter().take(limit).map(|(_, h)| h).collect())
     }
 
     fn find(&self, name: &str) -> anyhow::Result<(&[u8], u32)> {
@@ -215,6 +263,31 @@ impl Library {
     pub fn container_count(&self) -> usize {
         self.containers.len()
     }
+}
+
+/// Query tokens worth matching on. Anything shorter than three characters is noise: it matches
+/// most of the corpus and says nothing about what the caller wants.
+fn terms_of(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn words_of(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// A term matches a whole word, or a word beginning with it when the term is long enough for a
+/// prefix to mean something — so "test" reaches "testing" and "ui" reaches nothing it should not.
+fn hits_word(words: &[String], term: &str) -> bool {
+    words
+        .iter()
+        .any(|w| w == term || (term.chars().count() >= 4 && w.starts_with(term)))
 }
 
 fn in_subtree(s: &Skill<'_>, mut node: u32, root: u32) -> bool {
