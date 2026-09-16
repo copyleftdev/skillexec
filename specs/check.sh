@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-JAR="${TLA2TOOLS:-/home/ops/.local/lib/tla2tools.jar}"
+JAR="${TLA2TOOLS:-$HOME/.local/lib/tla2tools.jar}"
 WORKERS="${TLC_WORKERS:-4}"
 HEAP="${TLC_HEAP:-4g}"
 LIMIT="${TLC_TIMEOUT:-600}"

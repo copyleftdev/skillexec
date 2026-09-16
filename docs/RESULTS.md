@@ -3,7 +3,7 @@
 Numbers here are reproducible from this tree. Nothing is estimated.
 
 ```sh
-find ~/.claude ~/Project -name SKILL.md -not -path '*/node_modules/*' | sort -u > corpus.txt
+find <your-skill-dirs> -name SKILL.md -not -path '*/node_modules/*' | sort -u > corpus.txt
 cargo run --release --bin skillc -- corpus corpus.txt
 ./scripts/fuzz.sh 600 4
 ./specs/check.sh

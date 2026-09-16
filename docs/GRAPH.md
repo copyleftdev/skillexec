@@ -5,8 +5,8 @@ Status: draft 0.1 — data model only. No byte layout here; see `SPEC.md`.
 ## 1. Why a graph, and where it came from
 
 This model was not designed from first principles. It was **derived from 8,776 `SKILL.md`
-files** found on one workstation (`~/.claude`, `~/Project`, including the skillrouter corpus),
-by measuring what authors actually wrote.
+files** found on one workstation, across plugin caches, project skill directories and
+vendored corpora, by measuring what authors actually wrote.
 
 Corpus shape:
 
@@ -155,7 +155,7 @@ canonical subtree. Consequences, all free:
 - A section's identity is its subtree hash — so two skills sharing a "quality checks" section
   store those bytes once, and dedup is automatic across a corpus.
 - Any subtree can be proven a member of a signed skill without disclosing its siblings
-  (selective disclosure, same shape as the VC work in aion-trust).
+  (selective disclosure, the same shape as a W3C Verifiable Presentation).
 - A diff between two skill versions is a tree diff over stable hashes, not a text diff.
 
 ## 7. Canonical form

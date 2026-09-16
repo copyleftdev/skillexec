@@ -1,5 +1,7 @@
 # skillexec
 
+[![Tip my tokens](https://tokentip.to/badge/copyleftdev.svg?logo=1)](https://tokentip.to/@copyleftdev)
+
 A binary container for agent skills: `SKILL.md` compiled into a signed, mmap-able, lazily
 verified graph with executable segments.
 

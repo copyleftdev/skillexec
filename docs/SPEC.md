@@ -320,7 +320,7 @@ round-trip properties (§`GRAPH.md` 8) go to property-based tests.
 
 1. Bundle vs. store — single self-contained file (assumed here) with content-addressed segments
    so a CDN can dedupe, vs. a thin file referencing an external CAS.
-2. Signing — raw Ed25519 + transparency log (assumed; matches AION) vs. X.509/sigstore.
+2. Signing — raw Ed25519 keys plus a transparency log (assumed here) vs. X.509 / sigstore.
 3. Whether tier-0 across a corpus gets a *separate* index file, or is scavenged from N files by
    mmap-ing 64 bytes of each. The corpus is 8,776 files; both are viable and the measurement is
    cheap.
