@@ -71,6 +71,7 @@ pub enum Error {
         dst: u32,
     },
     NeedsCycle(u32),
+    ObligationCycle(u32),
     NeedsBadTarget {
         src: u32,
         dst: u32,

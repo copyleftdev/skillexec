@@ -99,6 +99,11 @@ fn check_edges(m: &Manifest<'_>, nodes: &[Node]) -> Result<()> {
     let total = m.edge_count();
     let n = as_u32(nodes.len());
     let mut needs: Vec<Vec<u32>> = vec![Vec::new(); nodes.len()];
+    // Every edge kind the loader has no choice about following. TLC showed that checking these
+    // one relation at a time is strictly weaker than checking their union: `guards = {1->2}`
+    // with `alt = {2->1}` is two acyclic relations and one infinite loop. ALT was not being
+    // checked for cycles at all, so a pair of nodes could fall back to each other forever.
+    let mut obligation: Vec<Vec<u32>> = vec![Vec::new(); nodes.len()];
 
     for (si, node) in nodes.iter().enumerate() {
         let src = as_u32(si);
@@ -154,12 +159,16 @@ fn check_edges(m: &Manifest<'_>, nodes: &[Node]) -> Result<()> {
                 }
                 EdgeKind::Cites => {}
             }
+            if edge.kind != EdgeKind::Cites && !edge.external {
+                obligation[si].push(edge.dst);
+            }
         }
     }
-    check_needs_acyclic(&needs)
+    cycle_free(&needs).map_err(Error::NeedsCycle)?;
+    cycle_free(&obligation).map_err(Error::ObligationCycle)
 }
 
-fn check_needs_acyclic(adj: &[Vec<u32>]) -> Result<()> {
+fn cycle_free(adj: &[Vec<u32>]) -> core::result::Result<(), u32> {
     #[derive(Clone, Copy, PartialEq)]
     enum Mark {
         White,
@@ -180,7 +189,7 @@ fn check_needs_acyclic(adj: &[Vec<u32>]) -> Result<()> {
             if let Some(&next) = adj[ni].get(edge_i) {
                 stack.push((node, edge_i + 1));
                 match mark[next as usize] {
-                    Mark::Grey => return Err(Error::NeedsCycle(next)),
+                    Mark::Grey => return Err(next),
                     Mark::White => {
                         mark[next as usize] = Mark::Grey;
                         stack.push((next, 0));

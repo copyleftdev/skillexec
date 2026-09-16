@@ -6,6 +6,7 @@ Numbers here are reproducible from this tree. Nothing is estimated.
 find ~/.claude ~/Project -name SKILL.md -not -path '*/node_modules/*' | sort -u > corpus.txt
 cargo run --release --bin skillc -- corpus corpus.txt
 ./scripts/fuzz.sh 600 4
+./specs/check.sh
 ```
 
 ## Compiling the corpus
@@ -85,3 +86,44 @@ Three 20-second campaigns, seeds 1 / 99999 / 4242424:
 The 10.8% accept rate is the number that makes the campaign meaningful: mutations are reaching
 graph validation and lazy hash verification, not dying at the magic check. The gate runs a
 5-second version of the same campaign on every invocation.
+
+
+## Model checking
+
+`specs/check.sh` — 13 TLC configurations, 88 s wall, capped at 4 workers and a 4 GB heap, niced,
+per-run timeout, hermetic metadir. **Six are canaries that must fail**; the script exits non-zero
+if one passes, because a suite whose canaries also pass checked nothing.
+
+| Configuration | Expected | What it establishes |
+|---|---|---|
+| `SkillTree.cfg` | holds | the one forward pass is **equivalent** to the semantic tree, pre-order and tier invariants, over all 1,889,568 five-node graphs |
+| `TreeRedundancy.cfg` | holds | the pre-order scan implies `parent < self` |
+| `TreeCanaryParentBefore.cfg` | violated | `parent < self` alone permits a split subtree |
+| `TreeCanaryPreOrderScan.cfg` | violated | the scan is load-bearing |
+| `TreeCanaryTier.cfg` | violated | tier monotonicity is load-bearing |
+| `TreeCanaryRootTier.cfg` | violated | the root-is-tier-0 rule is load-bearing |
+| `SkillSeq.cfg` | holds | `dst > src` implies `SEQ` acyclicity |
+| `SeqCanaryConverse.cfg` | violated | the converse fails: `seq = {⟨2,1⟩}` is the cost |
+| `SkillEdges.cfg` | violated | **without a union check, `ALT` alone cycles** |
+| `EdgesCanaryPiecewise.cfg` | violated | per-relation acyclicity ≠ union acyclicity |
+| `EdgesFixed.cfg` | holds | with the union check, activation terminates |
+| `SkillGraph.cfg` | holds | tree and obligations composed, 15,136,875 states |
+| `GraphWithDescent.cfg` | violated | open question: an obligation into an ancestor (`SPEC.md` §10.7) |
+
+### What it found that nothing else did
+
+Two defects, both written up in `SPEC.md` §10.6.
+
+**`ALT` was never checked for cycles.** `alt = {⟨1,2⟩, ⟨2,1⟩}` — two nodes falling back to each
+other forever — was a valid file. **And checking each relation separately is strictly weaker than
+checking the union**: `guards = {⟨1,2⟩}` with `alt = {⟨2,1⟩}` is two acyclic relations and one
+infinite loop.
+
+Neither is a byte mutation. Both are graphs the *writer emits happily*, which is exactly why
+46 million fuzz inputs and 24 hostile-corpus cases missed them — a fuzzer mutates files, and
+these are defects in what counts as a valid graph. The division of labour is real: the fuzzer
+found nothing here, and the model checker found nothing the fuzzer was looking for.
+
+It also corrected the spec. `SPEC.md` §4.4 claimed the tree invariant was proven by one
+comparison per node. It is not; `parent = ⟨0,1,1,1,2⟩` has every parent preceding its child and a
+subtree split in half. The ancestor walk is doing the work.

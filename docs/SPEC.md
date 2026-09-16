@@ -128,9 +128,21 @@ Sorted ⇒ lookup is a binary search; deduped ⇒ equality is an integer compari
 | 0x18 | 4 | `hash_idx` — into HASHES; BLAKE3 root of the canonical subtree |
 | 0x1C | 4 | `parent` — node index, `0xFFFFFFFF` for root |
 
-Nodes are stored in `CONTAINS` pre-order. Therefore **`parent < self` for every non-root node**,
-and the tree invariant (`GRAPH.md` §9.1) is proven by one comparison per node in a single
-forward pass. No auxiliary structure, no cycle detection, no allocation.
+Nodes are stored in `CONTAINS` pre-order. A reader therefore checks, for each node `n > 0`:
+
+```
+parent[n] ∈ {n-1} ∪ ancestors(n-1)
+```
+
+one ancestor walk per node, no auxiliary structure, no cycle detection, no allocation. TLC
+confirms this is **exactly equivalent** to the semantic tree, pre-order and tier invariants over
+every five-node graph (`specs/SkillTree.tla`).
+
+`parent < self` follows from that scan rather than standing beside it, so the `ParentNotBefore`
+check is redundant and kept only for a precise error. An earlier draft of this section claimed
+the tree invariant was proven by *one comparison* per node; that is false, and the counterexample
+is `parent = ⟨0,1,1,1,2⟩` — every parent precedes its child, and node 2's subtree is still split
+in half.
 
 ### 4.5 Edge record (8 bytes)
 
@@ -148,7 +160,15 @@ the file and stays acyclic, so activation terminates.
 
 `SEQ` additionally requires `dst > src`. Because nodes are stored in pre-order, that makes the
 canonical node order a topological order of `SEQ`, so acyclicity is an `O(E)` comparison instead
-of a traversal — the same trick as `parent < self`.
+of a traversal.
+
+This is a **restriction, not a free win**, and the cost is stated rather than hidden: a `SEQ`
+order that disagrees with document order is acyclic but unrepresentable. The minimal case TLC
+produces is `seq = {⟨2,1⟩}` — "the step written second runs first". Authors who need that reorder
+the document.
+
+**The union of obligation edges must be acyclic** — `SEQ ∪ GUARDS ∪ NEEDS ∪ ALT`, checked as one
+graph, not four (§10.6). `CITES` is excluded and may cycle freely.
 
 ### 4.6 Segment record (96 bytes)
 
@@ -336,3 +356,37 @@ payload ranges and were rejected by the validator's own overlap rule.
 Dedup is now exact-blob only, keyed by `(region, bytes)`. Identical ranges stay legal, which is
 what content addressing needs; partial overlap remains a rejection. The substring version was
 also `O(region × payload)` per node, which the corpus run made visible.
+
+
+### 10.6 Activation did not terminate
+
+`GRAPH.md` §3 claimed that everything the loader is obliged to follow stays acyclic, so
+activation terminates. TLC was asked to confirm it and refused, twice
+(`specs/SkillEdges.tla`).
+
+**ALT was not checked for cycles at all.** The validator enforced ordinal uniqueness on `ALT`
+and nothing else, so `alt = {⟨1,2⟩, ⟨2,1⟩}` was accepted: node 1 falls back to node 2, node 2
+falls back to node 1, forever. Two nodes, one infinite loop, and every unit test passed.
+
+**Checking each relation separately is strictly weaker than checking their union.** Even with
+every relation individually acyclic, `guards = {⟨1,2⟩}` with `alt = {⟨2,1⟩}` is two acyclic
+relations whose union is a cycle. Nothing looked at the union.
+
+The validator now builds one obligation graph from `SEQ ∪ GUARDS ∪ NEEDS ∪ ALT` and rejects a
+cycle in it (`Error::ObligationCycle`). `NEEDS` keeps its own separate pass so that the common
+case still reports `Error::NeedsCycle`. With the union check in place, TLC confirms the claim.
+
+Neither cycle is a byte mutation. Both are graphs the writer emits happily, which is why 24
+hostile-corpus cases and 46M fuzz inputs missed them: the fuzzer mutates *files*, and these are
+defects in what counts as a valid *graph*.
+
+### 10.7 Open: obligations that point at an ancestor
+
+A loader descends the `CONTAINS` tree from parent to child. If descent counts as an edge, then
+`oblig = {⟨2,1⟩}` with node 2 a child of node 1 is a cycle: enter 1, descend to 2, and 2 requires
+1. TLC finds it immediately (`specs/SkillGraph.tla`, `INCLUDE_DESCENT = TRUE`).
+
+Whether that is a defect depends on loader semantics this spec has not pinned down — a memoizing
+loader that marks a node in-progress resolves it; a naive one loops. It is recorded here rather
+than fixed, because inventing a rule before the execution model exists is how formats acquire
+restrictions nobody can explain later.

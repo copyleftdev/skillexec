@@ -84,7 +84,12 @@ pre-order position, and storing it again as edge records would be a second encod
 
 `CITES` is the only kind permitted to leave the file, and the only one permitted to cycle.
 That asymmetry is the point: everything the loader is *obliged* to follow is acyclic and
-bounded, so activation always terminates. Cross-skill composition (measured: 171 `../<skill>/SKILL.md`
+bounded, so activation always terminates.
+
+That sentence was false when first written. Per-relation acyclicity does not give it — see
+`SPEC.md` §10.6. It holds now because the validator checks `SEQ ∪ GUARDS ∪ NEEDS ∪ ALT` as **one
+graph**, which is the thing a loader actually walks, and TLC confirms the claim over that
+formulation (`specs/SkillEdges.tla`). Cross-skill composition (measured: 171 `../<skill>/SKILL.md`
 links in the 600-skill sample) is expressive but never mandatory.
 
 ## 4. Tiers — progressive disclosure as a layout property
@@ -184,6 +189,8 @@ A file is well-formed only if all of these hold. These are the TLA+ obligations.
 1. The parent pointers form a single tree rooted at node 0, and node 0 is tier 0.
 2. `SEQ` is acyclic.
 3. `NEEDS` is acyclic and targets only `Binding` / `Resource` / `Segment`.
+3a. The **union** `SEQ ∪ GUARDS ∪ NEEDS ∪ ALT` is acyclic. Not implied by 3 and 2 — see
+    `SPEC.md` §10.6.
 4. `tier` is monotone non-decreasing from parent to child.
 5. `GUARDS` sources are `Contract` nodes.
 6. `ALT` ordinals are unique per source.
@@ -194,5 +201,9 @@ A file is well-formed only if all of these hold. These are the TLA+ obligations.
 9. The node ordering equals the canonical ordering of §7.
 10. Every reserved field is zero.
 
-Invariants 1–6 are graph properties and belong in the model checker. 7–10 are parser
-properties and belong in the fuzzer.
+Invariants 1–6 are graph properties and belong in the model checker; 7–10 are parser properties
+and belong in the fuzzer. Both now exist: `specs/check.sh` runs 13 TLC configurations, six of
+them canaries that must fail, and `scripts/fuzz.sh` runs the bounded parser fuzzer.
+
+The division is not cosmetic. The fuzzer mutates files and found nothing here; the model checker
+reasons about graphs and found two ways activation could fail to terminate.

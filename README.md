@@ -9,16 +9,21 @@ verified graph with executable segments.
 - `docs/RESULTS.md` — what compiling and fuzzing the corpus actually measured
 - `crates/skill-format` — reference reader, validator and canonical writer (`forbid(unsafe)`)
 - `crates/skillc` — `SKILL.md` → `.skill` compiler, and the renderer that proves the round-trip
+- `specs/` — TLA+ models of the graph invariants, with canaries that must fail
 
 ```sh
 ./scripts/gate.sh                    # fmt, clippy -D warnings, tests, 5s fuzz, spec agreement
 ./scripts/fuzz.sh 600 4              # long fuzz, capped at one core and 2G under systemd
 cargo run --example dump_minimal     # the spec's worked example, regenerated
 cargo run --release --bin skillc -- corpus <list-of-SKILL.md-paths>
+./specs/check.sh                     # 13 TLC runs, 6 of them canaries, ~90s
 ```
 
 All 8,776 `SKILL.md` files on this workstation compile, verify, and render back — 99.85%
-byte-exact, 100% modulo trailing whitespace. 46M fuzz inputs, zero panics, 31 MB peak RSS.
+byte-exact, 100% modulo trailing whitespace. 46M fuzz inputs, zero panics, 31 MB peak RSS. TLC
+proves the validator's single forward pass equivalent to the semantic tree invariants over every
+five-node graph, and found two ways activation could fail to terminate that the fuzzer could
+not reach.
 
 ## Why
 

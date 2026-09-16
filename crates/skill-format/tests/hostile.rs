@@ -303,3 +303,59 @@ fn every_rejection_names_a_spec_step() {
         assert!((1..=7).contains(&e.step()), "{e:?} has no step");
     }
 }
+
+// The two cycles TLC found in specs/SkillEdges.tla. Neither is a byte mutation: both are graphs
+// a writer will happily emit, which is why per-relation checks missed them.
+
+#[test]
+fn alt_edges_must_not_cycle() {
+    use skill_format::{Builder, EdgeKind, Kind, Tier};
+    let mut b = Builder::new("altloop", "Two nodes that fall back to each other forever.");
+    let root = b.root(Kind::Prose, Tier::Routing, 0, Vec::new());
+    let a = b.child(root, Kind::Prose, Tier::Body, 0, Some("a"), &b"a"[..], 2);
+    let c = b.child(root, Kind::Prose, Tier::Body, 0, Some("c"), &b"c"[..], 2);
+    b.edge(a, EdgeKind::Alt, c, 0, 0);
+    b.edge(c, EdgeKind::Alt, a, 0, 0);
+    let bytes = b.build().expect("a writer will emit this happily");
+    assert!(matches!(open(&bytes), Err(Error::ObligationCycle(_))));
+}
+
+#[test]
+fn obligation_union_must_not_cycle_across_edge_kinds() {
+    use skill_format::{Builder, EdgeKind, Kind, Tier};
+    let mut b = Builder::new(
+        "union",
+        "GUARDS and ALT are each acyclic; together they are not.",
+    );
+    let root = b.root(Kind::Prose, Tier::Routing, 0, Vec::new());
+    let gate = b.child(
+        root,
+        Kind::Contract,
+        Tier::Body,
+        0,
+        Some("gate"),
+        &b"g"[..],
+        2,
+    );
+    let step = b.child(root, Kind::Prose, Tier::Body, 0, Some("step"), &b"s"[..], 2);
+    b.edge(gate, EdgeKind::Guards, step, 0, 0);
+    b.edge(step, EdgeKind::Alt, gate, 0, 0);
+    let bytes = b.build().expect("writer emits it");
+    assert!(matches!(open(&bytes), Err(Error::ObligationCycle(_))));
+}
+
+#[test]
+fn cites_may_still_cycle_because_it_carries_no_obligation() {
+    use skill_format::{Builder, EdgeKind, Kind, Tier};
+    let mut b = Builder::new(
+        "cites",
+        "Cross-references may cycle; nothing must follow them.",
+    );
+    let root = b.root(Kind::Prose, Tier::Routing, 0, Vec::new());
+    let a = b.child(root, Kind::Prose, Tier::Body, 0, Some("a"), &b"a"[..], 2);
+    let c = b.child(root, Kind::Prose, Tier::Body, 0, Some("c"), &b"c"[..], 2);
+    b.edge(a, EdgeKind::Cites, c, 0, 0);
+    b.edge(c, EdgeKind::Cites, a, 0, 0);
+    let bytes = b.build().unwrap();
+    open(&bytes).expect("a CITES cycle is legal");
+}
