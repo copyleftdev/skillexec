@@ -8,39 +8,51 @@ verified graph with executable segments.
 - `docs/GRAPH.md` — the data model, derived by measuring 8,776 real `SKILL.md` files
 - `docs/SPEC.md` — the byte layout, verification order, conformance corpus, and the defects
   that writing the implementation forced back into the spec (§10)
-- `docs/RESULTS.md` — what compiling and fuzzing the corpus actually measured
+- `docs/RESULTS.md` — every measured number, including the ones that went against the design
 - `crates/skill-format` — reference reader, validator and canonical writer (`forbid(unsafe)`)
 - `crates/skillc` — `SKILL.md` → `.skill` compiler, and the renderer that proves the round-trip
 - `crates/skill-run` — capability-gated, resource-bounded wasm executor for segments
+- `crates/corpusctl` — corpus assembly: supervised clones, pruning, BLAKE3 dedup, experiment runs
 - `specs/` — TLA+ models of the graph invariants, with canaries that must fail
 
 ```sh
 ./scripts/gate.sh                    # fmt, clippy -D warnings, tests, 5s fuzz, spec agreement
 ./scripts/fuzz.sh 600 4              # long fuzz, capped at one core and 2G under systemd
 cargo run --example dump_minimal     # the spec's worked example, regenerated
-cargo run --release --bin skillc -- dict   <list> corpus.dict
-cargo run --release --bin skillc -- corpus <list> --profile compact --dict corpus.dict
-cargo run --release --bin skillc -- roles  <list>   # does the taxonomy generalise?
-cargo run --release --bin skillc -- cas    <list>   # corpus-wide dedup
-cargo run --release --bin skillc -- route  <list>   # routing cost vs zstd'd Markdown
 ./specs/check.sh                     # 13 TLC runs, 6 of them canaries, ~90s
+
+# assemble a corpus and run every experiment against it
+corpusctl clone --list repos.tsv --dest repos --jobs 8 --budget-gb 40
+corpusctl build --dest repos --out corpus.txt --exclude other-corpus.txt
+corpusctl run   --list corpus.txt --out results
+
+# or drive one experiment directly
+skillc roles  <list>    # does the heading taxonomy generalise?
+skillc cas    <list>    # what a corpus-wide content-addressed store would save
+skillc route  <list>    # routing cost against zstd'd Markdown
 ```
 
-**128,292 held-out skills from 236 GitHub repositories** compile, verify and render back with
-zero failures, alongside the 8,776 local ones the design came from. The heading taxonomy is the
-part that does *not* generalise — 40.6% fitted, 26.1% held out — which is the measurement that
-justifies keeping role out of the dispatch path entirely. Compiled and compressed they are **51% smaller than
-their source**, and route **160× faster** than the same skills stored as compressed Markdown — at
-1.6× the bytes. 46M fuzz inputs, zero panics. TLC proves the validator's single forward
-pass equivalent to the semantic tree invariants over every five-node graph, and found two ways
-activation could fail to terminate that the fuzzer could not reach.
+**128,292 held-out skills from GitHub** compile, verify and render back with zero failures,
+alongside the 8,776 local ones the design came from. Compressed they are **51% smaller than
+their source** and route **160× faster** than the same skills stored as zstd'd Markdown, at
+1.6× the bytes.
+
+The heading taxonomy is the part that does *not* hold up: **40.6% of headings recognised on the
+corpus it was fitted to, 26.1% on the held-out one**, with a long multilingual tail. Nothing
+breaks, because role never reaches the dispatch path — which is the measurement that justifies
+that separation rather than a claim about it.
+
+46M fuzz inputs, zero panics. TLC proves the validator's single forward pass equivalent to the
+semantic tree invariants over every five-node graph, and found two ways activation could fail to
+terminate that the fuzzer could not reach.
 
 ## Why
 
-`SKILL.md` is a linearization of a graph that is already there: across 8,776 independently
-authored skills, section roles converge hard (393 antipattern/pitfall/limitation headings, 324
-workflow steps, 281 prerequisite blocks in a 600-skill sample) without anyone agreeing on
-vocabulary. Compiling that graph buys three things Markdown cannot:
+`SKILL.md` is a linearization of a graph that is already there. Independently authored skills
+reuse a recognisable core vocabulary — antipatterns, workflow steps, prerequisites — without
+anyone agreeing on it. That vocabulary turns out to cover about a quarter of headings on skills
+the model has never seen, which is *why* the graph is typed by dispatch rather than by
+vocabulary. Compiling it buys three things Markdown cannot:
 
 - **Progressive disclosure becomes layout.** Tier is monotone from parent to child, so the
   loaded set is always a prefix-closed subtree, and the routing plane is physically separate

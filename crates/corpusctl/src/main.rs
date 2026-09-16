@@ -41,11 +41,13 @@ fn main() {
         "clone" => clone(&args),
         "prune" => prune(&args),
         "build" => build(&args),
+        "run" => run(&args),
         _ => eprintln!(
             "usage:\n  \
              corpusctl clone --list <tsv> --dest <dir> [--jobs N] [--budget-gb N] [--timeout N] [--max-kb N]\n  \
              corpusctl prune --dest <dir> --sidecar <tsv> [--jobs N]\n  \
-             corpusctl build --dest <dir> --out <txt> [--exclude <txt>] [--jobs N]"
+             corpusctl build --dest <dir> --out <txt> [--exclude <txt>] [--jobs N]\n  \
+             corpusctl run   --list <txt> --out <dir> [--skillc <path>] [--dict <path>]"
         ),
     }
 }
@@ -214,6 +216,97 @@ fn git_clone(full: &str, path: &Path, timeout: Duration) -> bool {
             Err(_) => return false,
         }
     }
+}
+
+// ---------------------------------------------------------------------------- run
+
+/// Runs the experiment suite, one child per step, each writing straight to its own file.
+///
+/// No pipes: filtering a long run through `grep` buffers the whole thing, so a child that dies
+/// late discards results it had already computed. That cost two completed runs.
+fn run(args: &[String]) {
+    let list = need(args, "--list");
+    let out = PathBuf::from(flag(args, "--out").unwrap_or_else(|| "results".into()));
+    let skillc = flag(args, "--skillc")
+        .unwrap_or_else(|| "/home/ops/.cargo-target/release/skillc".to_string());
+    let dict = flag(args, "--dict").unwrap_or_else(|| "full.dict".to_string());
+    fs::create_dir_all(&out).expect("out dir");
+
+    let mut steps: Vec<(&str, Vec<String>)> = vec![
+        ("01-roles", vec!["roles".into(), list.clone()]),
+        (
+            "02-structure",
+            vec![
+                "corpus".into(),
+                list.clone(),
+                "999999".into(),
+                "--profile".into(),
+                "none".into(),
+            ],
+        ),
+        ("03-cas", vec!["cas".into(), list.clone()]),
+        (
+            "04-dict",
+            vec!["dict".into(), list.clone(), dict.clone(), "112640".into()],
+        ),
+    ];
+    for p in ["none", "mapped", "compact"] {
+        steps.push((
+            Box::leak(format!("05-size-{p}").into_boxed_str()),
+            vec![
+                "corpus".into(),
+                list.clone(),
+                "999999".into(),
+                "--profile".into(),
+                p.into(),
+            ],
+        ));
+    }
+    for p in ["mapped", "compact"] {
+        steps.push((
+            Box::leak(format!("06-size-{p}-dict").into_boxed_str()),
+            vec![
+                "corpus".into(),
+                list.clone(),
+                "999999".into(),
+                "--profile".into(),
+                p.into(),
+                "--dict".into(),
+                dict.clone(),
+            ],
+        ));
+        steps.push((
+            Box::leak(format!("07-route-{p}").into_boxed_str()),
+            vec![
+                "route".into(),
+                list.clone(),
+                "--profile".into(),
+                p.into(),
+                "--dict".into(),
+                dict.clone(),
+            ],
+        ));
+    }
+
+    for (name, argv) in steps {
+        let started = Instant::now();
+        let path = out.join(format!("{name}.txt"));
+        let Ok(fh) = fs::File::create(&path) else {
+            continue;
+        };
+        let status = Command::new(&skillc)
+            .args(&argv)
+            .stdout(Stdio::from(fh))
+            .stderr(Stdio::null())
+            .status();
+        let ok = status.is_ok_and(|s| s.success());
+        println!(
+            "{name:<22} {:>8?}  {}",
+            started.elapsed(),
+            if ok { "ok" } else { "FAILED" }
+        );
+    }
+    let _ = fs::File::create(out.join("COMPLETE"));
 }
 
 // ---------------------------------------------------------------------------- prune

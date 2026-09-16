@@ -1,15 +1,53 @@
 # Measured results
 
-Numbers here are reproducible from this tree. Nothing is estimated.
+Every number here is reproducible from this tree. Nothing is estimated.
+
+## Reproducing
 
 ```sh
-find <your-skill-dirs> -name SKILL.md -not -path '*/node_modules/*' | sort -u > corpus.txt
-cargo run --release --bin skillc -- corpus corpus.txt
-./scripts/fuzz.sh 600 4
-./specs/check.sh
+# assemble a corpus: clone, prune to SKILL.md, deduplicate by content
+corpusctl clone --list repos.tsv --dest repos --jobs 8 --budget-gb 40
+corpusctl build --dest repos --out corpus.txt --exclude other-corpus.txt
+
+# run the experiment suite; each step writes its own file under results/
+corpusctl run --list corpus.txt --out results
+
+./scripts/fuzz.sh 600 4      # bounded parser fuzzing
+./specs/check.sh             # 13 TLC runs, 6 of them canaries
 ```
 
-## Compiling the corpus
+`--exclude` subtracts another corpus by content hash. That is what makes a held-out corpus
+actually held out, rather than partly the set the model was fitted to.
+
+## The two corpora
+
+| | Corpus A | Corpus B |
+|---|---|---|
+| what it is | every skill on one workstation | GitHub, with A subtracted by content hash |
+| skills | 8,776 | 128,292 *(growing; see below)* |
+| source bytes | 64.9 MB | 879.1 MB |
+| role of it | the model was **derived** from this | **held out** |
+
+The distinction carries the whole report. Anything measured only on A is a description of one
+machine's skills; the claims that survive B are the ones worth making.
+
+## What found which defect
+
+Each row is a defect that the tools in the row above it did not find.
+
+| Found by | Defect |
+|---|---|
+| writing the reference reader | `CONTAINS` encoded twice; segment records unreachable; substring dedup overlapping ranges |
+| the fuzzer (46M inputs) | nothing the corpus also found — it guards the parser, and the parser held |
+| **TLC** | `ALT` cycles unchecked; per-relation acyclicity ≠ union acyclicity |
+| **corpus A** | four Markdown round-trip defects |
+| **corpus B** (14× larger) | frontmatter reconstructed rather than stored; a quadratic scan in `skillc roles` |
+| **running it at all** | a dictionary re-digested per region; `prune` spawning a process per file |
+
+The pattern worth noticing: the fuzzer mutates *files* and found no graph defects; the model
+checker reasons about *graphs* and found no parser defects. Neither is a substitute for a corpus.
+
+## Compiling corpus A
 
 8,776 `SKILL.md` files, every one found on one workstation. Single-threaded, 1.0 s wall.
 
@@ -295,11 +333,13 @@ ever routes over the corpus. For an archive nobody queries, gzip the Markdown.
 Everything above was measured on the corpus the design was derived from. This section is the
 same toolchain pointed at skills it had never seen.
 
-**How it was assembled.** 2,000 candidate repos found by GitHub topic search, name search and
-paced code search; 236 shallow-cloned; every `SKILL.md` collected, deduplicated by content, and
-then **every file whose content hash also appears in the original corpus removed** — 2,217 of
-them. Without that last step "held out" would have meant "partly the training set", and every
-rate here would be quietly inflated.
+**How it was assembled.** 1,870 candidate repos found by GitHub topic search, name search and
+paced code search; shallow-cloned and pruned to their `SKILL.md` files; deduplicated by content;
+then **every file whose content hash also appears in corpus A removed**. Without that last step
+"held out" would have meant "partly the training set", and every rate here would be quietly
+inflated.
+
+`corpusctl` does all of it — see *Assembling a corpus* below for why that matters.
 
 Result: **128,292 unique skills, 879.1 MB, 14.6× the corpus the model came from.**
 
@@ -354,9 +394,41 @@ twenty minutes without producing a number. A `HashMap` took the same run to **6 
 tool had to be pointed at a corpus an order of magnitude past its author's own before its
 complexity showed up at all — which is the argument for dogfooding at a scale you do not control.
 
+## Assembling a corpus
+
+The corpus tooling was shell first and is Rust now, because the shell version was the single
+largest source of defects in this project and none of them were about skills:
+
+| Shell behaviour | Symptom |
+|---|---|
+| `find` does not follow symlinks | a corpus of 0 files |
+| `xargs` on empty input runs the command against stdin | a phantom "1 distinct" |
+| relative paths consumed from another directory | `files 0`, silently |
+| `pgrep -f` matches the shell that invoked it | killed my own command, three times |
+| a wait loop whose watcher contained the watched pattern | permanent deadlock |
+| `grep` buffering plus a dead parent shell | two completed runs discarded |
+| one `find` subprocess per `SKILL.md` | nine repos in several minutes |
+
+`corpusctl` replaces it. Children are owned and killed through their own handle rather than by
+name match. Parallelism is an explicit flag defaulting to 8 — never `nproc`, because the box is
+shared and the shell version's unbounded fan-out froze it.
+
+| Stage | Shell | Rust |
+|---|---|---|
+| prune 72 repos | minutes | **10 s** |
+| deduplicate 755,428 files | never completed | **20 s** |
+| clone 100 repos | — | **39 s** |
+
+The speed is not hand-written SIMD, which here would mean optimising `unlink` and `getdents`.
+It is BLAKE3 in-process — AVX2 on this machine — instead of spawning one `md5sum` per file, plus
+bounded parallelism over the walk.
+
 ### One operational mistake worth recording
 
 The first clone run staged repositories in the session scratchpad, which lives under `/tmp` —
 **tmpfs on this machine**. Fourteen gigabytes of git repositories went into RAM before anyone
-looked. The corpus now goes to real disk, and `clone.sh` checks a disk budget between clones.
+looked. Clones now go to real disk, and `corpusctl clone` samples a disk budget as it works.
 A scratch directory is not scratch space if it is backed by memory.
+
+The second mistake was fan-out: enough concurrent background work to make the machine
+unresponsive. Every parallel stage now takes an explicit job count, and the default is modest.
