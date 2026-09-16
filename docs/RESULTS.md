@@ -433,6 +433,50 @@ executable fragments sit in fenced code blocks that nothing has ever checked. Co
 reports its ABI, its declared capabilities and its trust class — and a `HostTrusted` fragment is
 labelled, never contained.
 
+## Ranking: what lexical search could not do
+
+Searching the 192-skill working library for *"how do I make this UI less aggressive"* should
+return `quieter`, whose description reads "visually aggressive or overstimulating". Lexical search
+took three attempts and never got there:
+
+| Attempt | Result |
+|---|---|
+| substring match | `quieter` absent from the top 5 — `i` matched "interactive", `do` matched "dropdown" |
+| whole words, 3-char floor | `quieter` 4th |
+| rarity-weighted (IDF) | `quieter` 4th |
+
+The third attempt is not broken. Three skills contain the literal phrase *"how do I set this up"*,
+so they match the question form better than `quieter` matches it. That is the ceiling of matching
+prose against natural language, not a defect in the matcher.
+
+Adding vectors (§3.2 of `SPEC.md`) settles it, and the reported scores show exactly why:
+
+```
+1. quieter    lex=5.36  sem=0.312
+2. clarify    lex=2.96  sem=0.293
+3. configure  lex=5.34  sem=0.183
+```
+
+Lexically `quieter` and `configure` are a dead heat — 5.36 against 5.34. Meaning breaks the tie.
+
+Queries with no lexical purchase at all now work: *"my tests keep passing when they should fail"*
+returns `risk-based-testing`, `story-testability`, `dodds-testing-practices`; *"figure out who owns
+what after a funding round"* returns `captable`, `raise`, `diligence`.
+
+Both signals are reported on every hit. A search that cannot be asked why it ranked something is
+a search you have to take on faith.
+
+### What this costs, and what is not covered
+
+384 f32 dimensions is 1,536 bytes per skill: the working library went from 0.54 MB to 0.82 MB.
+For the 680,924-skill corpus the same scheme would be 1 GB, which is why `kind` exists in the
+block header and a quantised variant is the obvious next value.
+
+The semantic path is **not covered by the gate**. Exercising it needs an ONNX model fetched into
+a user cache, and a test suite that downloads a model on a clean machine is a test suite that
+fails on a clean machine. The format-level embedding tests — layout, commitment, tamper
+detection, count mismatch — run without it.
+
 ## Assembling a corpus
 
 The corpus tooling was shell first and is Rust now, because the shell version was the single

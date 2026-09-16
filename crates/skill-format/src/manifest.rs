@@ -22,6 +22,7 @@ pub const SECT_SRCSPANS: u16 = 8;
 pub const SECT_DICTREF: u16 = 9;
 pub const SECT_REGIONS: u16 = 10;
 pub const SECT_ROUTING: u16 = 11;
+pub const SECT_EMBEDDINGS: u16 = 12;
 
 const SECT_MUST_UNDERSTAND: u16 = 1 << 0;
 pub const SECT_ZSTD: u16 = 1 << 1;
@@ -72,6 +73,8 @@ pub struct Manifest<'a> {
     /// `(stored_len, BLAKE3)` of the routing block. The block lives outside the manifest, so
     /// without this it would be committed by nothing.
     pub routing: Option<(u32, [u8; 32])>,
+    /// `(stored_len, BLAKE3)` of the embedding block, when the file carries one.
+    pub embeddings: Option<(u32, [u8; 32])>,
     pub region_hashes: Option<([u8; 32], [u8; 32])>,
     strings: Option<Sect<'a>>,
     nodes: Option<Sect<'a>>,
@@ -120,6 +123,7 @@ impl<'a> Manifest<'a> {
             cold: (u32_at(raw, 0x20)?, u32_at(raw, 0x24)?, u32_at(raw, 0x2C)?),
             dict_hash: None,
             routing: None,
+            embeddings: None,
             region_hashes: None,
             strings: None,
             nodes: None,
@@ -215,6 +219,9 @@ impl<'a> Manifest<'a> {
         match id {
             SECT_DICTREF => self.dict_hash = Some(hash_at(raw, at)?),
             SECT_ROUTING => self.routing = Some((u32_at(raw, at)?, hash_at(raw, at + 4)?)),
+            SECT_EMBEDDINGS => {
+                self.embeddings = Some((u32_at(raw, at)?, hash_at(raw, at + 4)?));
+            }
             SECT_REGIONS => {
                 self.region_hashes = Some((hash_at(raw, at)?, hash_at(raw, at + 32)?));
             }

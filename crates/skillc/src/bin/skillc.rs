@@ -84,7 +84,12 @@ fn main() {
             let out = args.get(2).map_or("bundle.skill", String::as_str);
             let dict = flag(&args, "--dict")
                 .map(|p| Dictionary::new(&std::fs::read(p).expect("read dictionary")));
-            make_bundle(list, out, dict.as_ref());
+            make_bundle(
+                list,
+                out,
+                dict.as_ref(),
+                args.iter().any(|a| a == "--embed"),
+            );
         }
         Some("dict") => {
             let list = args.get(1).map_or("-", String::as_str);
@@ -122,7 +127,7 @@ fn show(path: &str, dict: Option<&Dictionary>) {
 }
 
 /// Compiles every skill in a list into one file, each a top-level skill in the routing block.
-fn make_bundle(list: &str, out: &str, dict: Option<&Dictionary>) {
+fn make_bundle(list: &str, out: &str, dict: Option<&Dictionary>, embed: bool) {
     let listing = std::fs::read_to_string(list).expect("read list");
     let mut docs = Vec::new();
     let mut src_bytes = 0usize;
@@ -137,7 +142,20 @@ fn make_bundle(list: &str, out: &str, dict: Option<&Dictionary>) {
         let desc = doc.get("description").unwrap_or("").to_string();
         docs.push((name, desc, doc));
     }
-    let (bytes, st) = skillc::bundle(&docs, Profile::Compact, dict).expect("bundle");
+    // Vectors come from the routing text only -- name and description -- because that is what
+    // a router is allowed to read. A vector built from bodies would describe a document the
+    // search path never opens.
+    let vectors = if embed {
+        let mut e = skill_embed::Embedder::new().expect("embedding model");
+        let texts: Vec<String> = docs
+            .iter()
+            .map(|(n, d, _)| skill_embed::routing_text(n, d))
+            .collect();
+        e.embed(&texts).expect("embed")
+    } else {
+        Vec::new()
+    };
+    let (bytes, st) = skillc::bundle_with(&docs, Profile::Compact, dict, vectors).expect("bundle");
     std::fs::write(out, &bytes).expect("write bundle");
 
     let entries = Skill::routing_view(&bytes).expect("routing");

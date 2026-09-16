@@ -9,6 +9,7 @@ description = "MCP server over .skill containers: routing-plane search, lazy bod
 [dependencies]
 skill-format = { path = "../skill-format" }
 skillc = { path = "../skillc" }
+skill-embed = { path = "../skill-embed" }
 anyhow = "1"
 rmcp = { version = "3.1", features = ["transport-io", "server"] }
 schemars = "1"

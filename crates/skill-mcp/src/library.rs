@@ -11,12 +11,21 @@
 
 use std::path::{Path, PathBuf};
 
-use skill_format::{Dictionary, Skill, TrustPolicy};
+/// How much of the ranking meaning contributes when both signals are available. Lexical matches
+/// are precise but literal; semantic ones generalise but drift. Neither deserves the whole vote.
+const SEMANTIC_WEIGHT: f32 = 0.6;
+use std::sync::Mutex;
+
+use skill_format::{Dictionary, Skill, TrustPolicy, embed};
 
 pub struct Library {
     containers: Vec<(PathBuf, Vec<u8>)>,
     dict: Option<Dictionary>,
     policy: TrustPolicy,
+    /// Built on first semantic query, and only when some container actually carries vectors.
+    /// Loading an ONNX model costs about half a second; a lexical-only library never pays it.
+    embedder: Mutex<Option<skill_embed::Embedder>>,
+    has_vectors: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +33,10 @@ pub struct Hit {
     pub name: String,
     pub description: String,
     pub container: String,
+    /// How much of the ranking came from matching words, and how much from meaning. Reported so
+    /// a caller can see why something ranked rather than having to trust the order.
+    pub lexical: f32,
+    pub semantic: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -72,10 +85,15 @@ impl Library {
             "no .skill containers at {}",
             path.display()
         );
+        let has_vectors = containers
+            .iter()
+            .any(|(_, b)| Skill::routing_view_with_embeddings(b).is_ok_and(|(_, e)| e.is_some()));
         Ok(Self {
             containers,
             dict,
             policy: TrustPolicy::permissive(),
+            embedder: Mutex::new(None),
+            has_vectors,
         })
     }
 
@@ -97,24 +115,26 @@ impl Library {
                     name: e.name.to_string(),
                     description: e.description.to_string(),
                     container: container.clone(),
+                    lexical: 0.0,
+                    semantic: 0.0,
                 });
             }
         }
         Ok(out)
     }
 
-    /// Ranks skills by how much each matching query term actually distinguishes them.
+    /// Ranks skills by matching words and, when the library carries vectors, by meaning.
     ///
-    /// This is not semantic search: it matches words the routing plane literally contains, so a
-    /// miss means the library does not describe the thing rather than that a model failed to
-    /// connect two ideas.
+    /// Lexical matching is precise when it fires and blind to paraphrase. It took two rounds to
+    /// make it honest — substring matching let `i` hit "interactive", and counting matched terms
+    /// tied "make" with "aggressive" — and even corrected it cannot answer "how do I make this
+    /// UI less aggressive" with `quieter`, because three other skills quote the phrase "how do I
+    /// set this up" and match the question form better. That is the ceiling of lexical search
+    /// over prose, not a bug in it.
     ///
-    /// It took two attempts to get the ranking honest. Matching substrings let `i` hit
-    /// "interactive" and `do` hit "dropdown", so stopwords buried the signal. Matching whole
-    /// words fixed that and still tied "make" with "aggressive" — a term is only worth what it
-    /// rules out, and "make" rules out nothing. Terms are now weighted by inverse document
-    /// frequency over the library itself, which is the cheap correct answer at 200 or 680,000
-    /// skills alike.
+    /// So both signals are used, each normalised across the candidates for this query, and both
+    /// are reported on every hit. A search that cannot be asked why it ranked something is a
+    /// search you have to take on faith.
     ///
     /// # Errors
     /// Fails if a container's routing block is malformed.
@@ -129,24 +149,56 @@ impl Library {
             return Ok(all.into_iter().take(limit).collect());
         }
 
-        // A library that large would not fit in memory anyway; the cast is bounded in practice.
+        let lexical = Self::lexical_scores(&catalogue, &terms);
+        let semantic = self.semantic_scores(query, catalogue.len());
+
+        let lex_max = lexical.iter().copied().fold(0.0f32, f32::max);
+        let sem_max = semantic.iter().copied().fold(0.0f32, f32::max);
+
+        let mut scored: Vec<(f32, Hit)> = Vec::new();
+        for (i, mut h) in catalogue.into_iter().enumerate() {
+            let lex = if lex_max > 0.0 {
+                lexical[i] / lex_max
+            } else {
+                0.0
+            };
+            let sem = if sem_max > 0.0 {
+                semantic[i] / sem_max
+            } else {
+                0.0
+            };
+            if lex <= 0.0 && sem <= 0.0 {
+                continue;
+            }
+            h.lexical = lexical[i];
+            h.semantic = semantic[i];
+            scored.push((SEMANTIC_WEIGHT * sem + (1.0 - SEMANTIC_WEIGHT) * lex, h));
+        }
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.name.cmp(&b.1.name))
+        });
+        Ok(scored.into_iter().take(limit).map(|(_, h)| h).collect())
+    }
+
+    /// Inverse document frequency over the library itself: a term is worth what it rules out.
+    fn lexical_scores(catalogue: &[Hit], terms: &[String]) -> Vec<f32> {
         #[allow(clippy::cast_precision_loss)]
-        let total = catalogue.len().max(1) as f64;
+        let total = catalogue.len().max(1) as f32;
         let docs: Vec<(Vec<String>, Vec<String>)> = catalogue
             .iter()
             .map(|h| (words_of(&h.name), words_of(&h.description)))
             .collect();
 
-        // How many skills contain each term at all. A term in half the library says almost
-        // nothing about which half the caller wants.
-        let weights: Vec<f64> = terms
+        let weights: Vec<f32> = terms
             .iter()
             .map(|t| {
                 #[allow(clippy::cast_precision_loss)]
                 let df = docs
                     .iter()
                     .filter(|(n, d)| hits_word(n, t) || hits_word(d, t))
-                    .count() as f64;
+                    .count() as f32;
                 if df == 0.0 {
                     0.0
                 } else {
@@ -155,27 +207,73 @@ impl Library {
             })
             .collect();
 
-        let mut scored: Vec<(f64, Hit)> = Vec::new();
-        for (h, (name_words, desc_words)) in catalogue.into_iter().zip(&docs) {
-            let mut score = 0.0;
-            for (t, w) in terms.iter().zip(&weights) {
-                // A name is a claim; a description is prose that can brush against any word.
-                if hits_word(name_words, t) {
-                    score += 3.0 * w;
-                } else if hits_word(desc_words, t) {
-                    score += *w;
+        docs.iter()
+            .map(|(name_words, desc_words)| {
+                let mut score = 0.0;
+                for (t, w) in terms.iter().zip(&weights) {
+                    // A name is a claim; a description is prose that brushes against any word.
+                    if hits_word(name_words, t) {
+                        score += 3.0 * w;
+                    } else if hits_word(desc_words, t) {
+                        score += *w;
+                    }
+                }
+                score
+            })
+            .collect()
+    }
+
+    /// Cosine similarity against the stored routing vectors, or zeros when there are none.
+    ///
+    /// Negative similarities are clamped away: a vector pointing the other way is not evidence
+    /// against a skill, it is the absence of evidence for it.
+    fn semantic_scores(&self, query: &str, n: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; n];
+        if !self.has_vectors {
+            return out;
+        }
+        let Ok(mut guard) = self.embedder.lock() else {
+            return out;
+        };
+        if guard.is_none() {
+            match skill_embed::Embedder::new() {
+                Ok(e) => *guard = Some(e),
+                // A missing model degrades search to lexical rather than failing the call.
+                Err(e) => {
+                    tracing::warn!(error = %e, "semantic search unavailable; lexical only");
+                    return out;
                 }
             }
-            if score > 0.0 {
-                scored.push((score, h));
+        }
+        let Some(model) = guard.as_mut() else {
+            return out;
+        };
+        let Ok(q) = model.embed_one(query) else {
+            return out;
+        };
+
+        let mut at = 0usize;
+        for (_, bytes) in &self.containers {
+            let Ok((entries, emb)) = Skill::routing_view_with_embeddings(bytes) else {
+                continue;
+            };
+            for i in 0..entries.len() {
+                if at >= n {
+                    break;
+                }
+                if let Some(e) = emb.as_ref().and_then(|e| e.get(i)) {
+                    out[at] = embed::cosine(&q, e).max(0.0);
+                }
+                at += 1;
             }
         }
-        scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.name.cmp(&b.1.name))
-        });
-        Ok(scored.into_iter().take(limit).map(|(_, h)| h).collect())
+        out
+    }
+
+    /// Whether this library can answer semantically at all.
+    #[must_use]
+    pub fn has_vectors(&self) -> bool {
+        self.has_vectors
     }
 
     fn find(&self, name: &str) -> anyhow::Result<(&[u8], u32)> {

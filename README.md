@@ -12,8 +12,9 @@ verified graph with executable segments.
 - `crates/skill-format` — reference reader, validator and canonical writer (`forbid(unsafe)`)
 - `crates/skillc` — `SKILL.md` → `.skill` compiler, and the renderer that proves the round-trip
 - `crates/skill-run` — capability-gated, resource-bounded wasm executor for segments
-- `crates/skill-mcp` — MCP server over a library of containers: routing-plane search, lazy
-  verified loading, segment capability disclosure
+- `crates/skill-mcp` — MCP server over a library of containers: hybrid lexical + semantic
+  routing-plane search, lazy verified loading, segment capability disclosure
+- `crates/skill-embed` — sentence embeddings for routing planes (ONNX MiniLM, 384 dims)
 - `crates/corpusctl` — corpus assembly: supervised clones, pruning, BLAKE3 dedup, experiment runs
 - `specs/` — TLA+ models of the graph invariants, with canaries that must fail
 
@@ -29,7 +30,7 @@ corpusctl build --dest repos --out corpus.txt --exclude other-corpus.txt
 corpusctl run   --list corpus.txt --out results
 
 # many skills in one signed, verifiable file
-skillc bundle <list-of-SKILL.md> personas.skill
+skillc bundle <list-of-SKILL.md> personas.skill --embed
 skillc show   personas.skill
 
 # serve that library to an agent over MCP

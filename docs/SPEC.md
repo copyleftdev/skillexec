@@ -96,6 +96,37 @@ deliberately does **not** verify it: the commitment is in the manifest, and read
 is the cost being avoided. Routing is a hint about what to open; opening is what decides whether
 the bytes are real.
 
+### 3.2 Embedding block
+
+Optional, immediately after the routing block, at `routing_off + routing_len`.
+
+| Off | Size | Field |
+|---|---|---|
+| 0x00 | 4 | magic `SEMB` |
+| 0x04 | 2 | `dims` |
+| 0x06 | 1 | `kind` — 0 = f32 little-endian |
+| 0x07 | 1 | `reserved` (zero) |
+| 0x08 | `count × dims × 4` | vectors, in routing-entry order |
+| … | — | zero padding to a multiple of 8 |
+
+Embeddings are **routing data**, so they live where routing data lives. Putting them in a
+manifest section would have made semantic search parse the manifest, which is the exact cost
+§3.1 exists to avoid. A semantic router reads the header, the routing block and this block, and
+stops.
+
+The magic makes the block self-describing: a file without embeddings is simply a file whose next
+bytes are the manifest, and a reader tells the difference without consulting anything. Absence is
+not an error.
+
+Vectors are stored **unnormalised**. A reader that wants cosine similarity normalises at
+comparison time; storing normalised vectors would silently discard magnitude a later scorer might
+want. `SECT_EMBEDDINGS` (§4.2) carries the block's length and BLAKE3, exactly as `SECT_ROUTING`
+does for routing — a block outside the manifest is committed by nothing otherwise.
+
+At 384 dimensions this costs 1,536 bytes per skill. That is nothing for a library and 1 GB for
+the 680,924-skill corpus, so a quantised `kind` is the obvious next value rather than a
+hypothetical one.
+
 ## 4. Manifest
 
 ### 4.1 Manifest header (48 bytes, at `manifest_off`)
@@ -146,6 +177,7 @@ of the manifest rather than inside it.
 | 9 | DICTREF | 32 B — BLAKE3 of the shared zstd dictionary this file requires |
 | 10 | REGIONS | 64 B — BLAKE3 of the **stored** HOT and COLD bytes |
 | 11 | ROUTING | 36 B — `len u32` then BLAKE3 of the routing block (§3.1) |
+| 12 | EMBEDDINGS | 36 B — `len u32` then BLAKE3 of the embedding block (§3.2) |
 
 Sections are 8-byte aligned. Absent optional sections are omitted, not zero-length.
 

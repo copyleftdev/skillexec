@@ -365,3 +365,102 @@ fn a_routing_entry_may_not_point_below_the_top_level() {
         Err(Error::RoutingRootNotTopLevel(3))
     ));
 }
+
+#[test]
+fn embeddings_ride_next_to_the_routing_plane() {
+    use skill_format::{Builder, embed};
+    let vecs = vec![vec![1.0f32, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
+    let mut b = Builder::bundle();
+    for (n, d) in [("alpha", "first"), ("beta", "second")] {
+        let root = b.add_skill(n, d);
+        b.child(
+            root,
+            Kind::Prose,
+            Tier::Body,
+            1,
+            Some("b"),
+            b"body\n".to_vec(),
+            1,
+        );
+    }
+    let bytes = b.vectors(vecs.clone()).build().unwrap();
+
+    // The read a semantic router does: header, routing block, embedding block, stop.
+    let (entries, emb) = Skill::routing_view_with_embeddings(&bytes).unwrap();
+    let emb = emb.expect("the file carries vectors");
+    assert_eq!(entries.len(), 2);
+    assert_eq!((emb.dims, emb.count), (3, 2));
+    assert_eq!(emb.get(0).unwrap(), &vecs[0][..]);
+
+    // Similarity discriminates, and is computed rather than assumed to be normalised.
+    assert!((embed::cosine(emb.get(0).unwrap(), &vecs[0]) - 1.0).abs() < 1e-6);
+    assert!(embed::cosine(emb.get(0).unwrap(), &vecs[1]).abs() < 1e-6);
+
+    Skill::open(&bytes, &TrustPolicy::permissive())
+        .unwrap()
+        .verify_all()
+        .unwrap();
+}
+
+#[test]
+fn a_file_without_vectors_reads_as_having_none() {
+    use common::rich;
+    let bytes = rich();
+    let (_, emb) = Skill::routing_view_with_embeddings(&bytes).unwrap();
+    assert!(emb.is_none(), "absence is not an error");
+}
+
+#[test]
+fn a_tampered_embedding_block_is_refused() {
+    use common::recommit;
+    use skill_format::Builder;
+    let mut b = Builder::bundle();
+    let root = b.add_skill("alpha", "first");
+    b.child(
+        root,
+        Kind::Prose,
+        Tier::Body,
+        1,
+        Some("b"),
+        b"body\n".to_vec(),
+        1,
+    );
+    let mut bytes = b.vectors(vec![vec![1.0f32, 2.0, 3.0]]).build().unwrap();
+
+    let off = {
+        let s = Skill::open(&bytes, &TrustPolicy::permissive()).unwrap();
+        let r = skill_format::routing::read(&bytes, s.header.routing_off()).unwrap();
+        s.header.routing_off() + r.stored_len
+    };
+    bytes[off + 8] ^= 0xFF;
+    recommit(&mut bytes);
+    assert!(matches!(
+        Skill::open(&bytes, &TrustPolicy::permissive()),
+        Err(Error::EmbeddingHashMismatch)
+    ));
+}
+
+#[test]
+fn a_vector_count_that_disagrees_with_the_skills_is_rejected() {
+    use skill_format::Builder;
+    let mut b = Builder::bundle();
+    for (n, d) in [("alpha", "first"), ("beta", "second")] {
+        let root = b.add_skill(n, d);
+        b.child(
+            root,
+            Kind::Prose,
+            Tier::Body,
+            1,
+            Some("b"),
+            b"x\n".to_vec(),
+            1,
+        );
+    }
+    assert!(matches!(
+        b.vectors(vec![vec![1.0f32, 0.0]]).build(),
+        Err(Error::EmbeddingCountMismatch {
+            entries: 2,
+            vectors: 1
+        })
+    ));
+}

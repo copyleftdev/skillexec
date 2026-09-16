@@ -3,5 +3,5 @@ pub mod compile;
 pub mod md;
 pub mod render;
 
-pub use compile::{Stats, build_into, bundle, compile, compile_with};
+pub use compile::{Stats, build_into, bundle, bundle_with, compile, compile_with};
 pub use render::{render, render_from};

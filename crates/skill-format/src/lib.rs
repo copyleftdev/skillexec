@@ -6,6 +6,7 @@
 //! proven to be the publisher's.
 
 pub mod codec;
+pub mod embed;
 pub mod error;
 pub mod graph;
 pub mod header;
@@ -144,6 +145,17 @@ impl<'a> Skill<'a> {
         let nodes = validate::graph(&manifest)?;
 
         check_routing_roots(&r.entries, &nodes)?;
+
+        // The embedding block sits outside the manifest, so like the routing block it needs its
+        // own commitment or it is covered by nothing.
+        let embed_off = header.routing_off() + r.stored_len;
+        if let Some(e) = embed::read(bytes, embed_off, r.entries.len())? {
+            let (want_len, want_hash) = manifest.embeddings.ok_or(Error::EmbeddingUncommitted)?;
+            let block = raw::bytes_at(bytes, embed_off, e.stored_len)?;
+            if e.stored_len != want_len as usize || blake3::hash(block).as_bytes() != &want_hash {
+                return Err(Error::EmbeddingHashMismatch);
+            }
+        }
         let spans = validate::payload_spans(&manifest, &nodes);
         for (cold, region, name, compressed) in [
             (
@@ -191,6 +203,23 @@ impl<'a> Skill<'a> {
         })
     }
 
+    /// One vector per skill, in routing-block order, if this file carries them.
+    ///
+    /// Read from a block adjacent to the routing plane, so semantic search costs the same kind
+    /// of read as lexical search: no manifest walk, no body, no decompression.
+    ///
+    /// # Errors
+    /// Rejects a malformed embedding block, or one whose vector count disagrees with the
+    /// number of skills.
+    pub fn embeddings(&self) -> Result<Option<embed::Embeddings>> {
+        let r = routing::read(self.bytes, self.header.routing_off())?;
+        embed::read(
+            self.bytes,
+            self.header.routing_off() + r.stored_len,
+            r.entries.len(),
+        )
+    }
+
     /// Every skill this file carries, in routing-block order.
     ///
     /// # Errors
@@ -234,6 +263,22 @@ impl<'a> Skill<'a> {
     pub fn routing_view(bytes: &'a [u8]) -> Result<Vec<routing::Entry<'a>>> {
         let header = Header::parse(bytes)?;
         Ok(routing::read(bytes, header.routing_off())?.entries)
+    }
+
+    /// Routing entries and their vectors together, without opening the container.
+    ///
+    /// This is the read a semantic router performs, and it is deliberately the same shape as
+    /// the lexical one: header, routing block, embedding block, stop.
+    ///
+    /// # Errors
+    /// Rejects a malformed header, routing block or embedding block.
+    pub fn routing_view_with_embeddings(
+        bytes: &'a [u8],
+    ) -> Result<(Vec<routing::Entry<'a>>, Option<embed::Embeddings>)> {
+        let header = Header::parse(bytes)?;
+        let r = routing::read(bytes, header.routing_off())?;
+        let e = embed::read(bytes, header.routing_off() + r.stored_len, r.entries.len())?;
+        Ok((r.entries, e))
     }
 
     #[must_use]

@@ -5,11 +5,12 @@ use crate::error::{Error, Result};
 use crate::graph::{Abi, EdgeKind, Kind, NONE32, Tier, TrustClass, node_flags};
 use crate::header::{HEADER_LEN, MAGIC, VERSION_MAJOR, VERSION_MINOR};
 use crate::manifest::{
-    DIR_ENTRY_LEN, MANIFEST_HDR_LEN, NODE_LEN, SECT_CAPS, SECT_DICTREF, SECT_EDGES, SECT_HASHES,
-    SECT_NODES, SECT_REGIONS, SECT_ROUTING, SECT_SEGMENTS, SECT_STRINGS, SECT_ZSTD, manifest_flags,
+    DIR_ENTRY_LEN, MANIFEST_HDR_LEN, NODE_LEN, SECT_CAPS, SECT_DICTREF, SECT_EDGES,
+    SECT_EMBEDDINGS, SECT_HASHES, SECT_NODES, SECT_REGIONS, SECT_ROUTING, SECT_SEGMENTS,
+    SECT_STRINGS, SECT_ZSTD, manifest_flags,
 };
-use crate::routing;
 use crate::subtree_hash;
+use crate::{embed, routing};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeId(usize);
@@ -95,6 +96,8 @@ pub struct Builder {
     /// `(build index of the skill's root node, name, description)`. Empty means a single-skill
     /// file whose root is node 0.
     skills: Vec<(usize, String, String)>,
+    /// One vector per skill, in the order skills were added.
+    vectors: Vec<Vec<f32>>,
 }
 
 impl Builder {
@@ -109,7 +112,18 @@ impl Builder {
             profile: Profile::default(),
             dict: None,
             skills: Vec::new(),
+            vectors: Vec::new(),
         }
+    }
+
+    /// Attaches one vector per skill, in the order they were added.
+    ///
+    /// Stored next to the routing plane so a semantic search costs the same kind of read as a
+    /// lexical one. A count that disagrees with the number of skills is rejected at build.
+    #[must_use]
+    pub fn vectors(mut self, vectors: Vec<Vec<f32>>) -> Self {
+        self.vectors = vectors;
+        self
     }
 
     /// A file carrying several skills. Node 0 is a synthetic root and each skill is one of its
@@ -496,6 +510,17 @@ impl Builder {
                 .collect()
         };
         let routing_block = routing::encode(&entries)?;
+        let embed_block = if self.vectors.is_empty() {
+            Vec::new()
+        } else {
+            if self.vectors.len() != entries.len() {
+                return Err(Error::EmbeddingCountMismatch {
+                    entries: entries.len(),
+                    vectors: self.vectors.len(),
+                });
+            }
+            embed::encode(&self.vectors)?
+        };
         let mut routing_sec = Vec::with_capacity(36);
         routing_sec.extend_from_slice(
             &u32::try_from(routing_block.len())
@@ -504,6 +529,17 @@ impl Builder {
         );
         routing_sec.extend_from_slice(blake3::hash(&routing_block).as_bytes());
         sections.push((SECT_ROUTING, routing_sec, 1));
+
+        if !embed_block.is_empty() {
+            let mut sec = Vec::with_capacity(36);
+            sec.extend_from_slice(
+                &u32::try_from(embed_block.len())
+                    .map_err(|_| Error::OffsetOverflow { what: "embeddings" })?
+                    .to_le_bytes(),
+            );
+            sec.extend_from_slice(blake3::hash(&embed_block).as_bytes());
+            sections.push((SECT_EMBEDDINGS, sec, 1));
+        }
 
         let mut hot_flag = 0u16;
         let mut cold_flag = 0u16;
@@ -581,7 +617,7 @@ impl Builder {
             }
         }
 
-        let manifest_off = u32::try_from(HEADER_LEN + routing_block.len())
+        let manifest_off = u32::try_from(HEADER_LEN + routing_block.len() + embed_block.len())
             .map_err(|_| Error::OffsetOverflow { what: "manifest" })?;
         let manifest_len = u32::try_from(MANIFEST_HDR_LEN + dir_len + body.len())
             .map_err(|_| Error::OffsetOverflow { what: "manifest" })?;
@@ -625,6 +661,7 @@ impl Builder {
         out.extend_from_slice(blake3::hash(&manifest).as_bytes());
         debug_assert_eq!(out.len(), HEADER_LEN);
         out.extend_from_slice(&routing_block);
+        out.extend_from_slice(&embed_block);
         out.extend_from_slice(&manifest);
         out.extend_from_slice(&hot);
         out.extend_from_slice(&cold);

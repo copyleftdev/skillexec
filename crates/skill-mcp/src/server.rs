@@ -57,6 +57,10 @@ pub struct SearchHit {
     pub name: String,
     pub description: String,
     pub container: String,
+    /// Weight from matching words, rarer terms counting for more.
+    pub lexical: f32,
+    /// Cosine similarity between the query and this skill's stored routing vector.
+    pub semantic: f32,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -64,7 +68,7 @@ pub struct SearchResult {
     pub matched: usize,
     pub total_in_library: usize,
     pub hits: Vec<SearchHit>,
-    /// Stated so a caller knows a miss means the library does not describe the thing.
+    /// How the ranking was produced, so a miss can be read as a miss rather than a failure.
     pub matching: &'static str,
 }
 
@@ -145,9 +149,15 @@ impl SkillServer {
                     name: h.name,
                     description: h.description,
                     container: h.container,
+                    lexical: h.lexical,
+                    semantic: h.semantic,
                 })
                 .collect(),
-            matching: "literal substring over names and descriptions; not semantic",
+            matching: if self.library.has_vectors() {
+                "rarity-weighted word match blended with cosine similarity over stored vectors"
+            } else {
+                "rarity-weighted word match only; this library carries no vectors"
+            },
         }))
     }
 

@@ -192,7 +192,24 @@ pub fn bundle(
     profile: Profile,
     dict: Option<&Dictionary>,
 ) -> Result<(Vec<u8>, Stats)> {
+    bundle_with(docs, profile, dict, Vec::new())
+}
+
+/// As [`bundle`], with one routing vector per skill.
+///
+/// # Errors
+/// Propagates any violation the writer detects, including a vector count that disagrees with
+/// the number of skills.
+pub fn bundle_with(
+    docs: &[(String, String, Document)],
+    profile: Profile,
+    dict: Option<&Dictionary>,
+    vectors: Vec<Vec<f32>>,
+) -> Result<(Vec<u8>, Stats)> {
     let mut b = Builder::bundle().profile(profile);
+    if !vectors.is_empty() {
+        b = b.vectors(vectors);
+    }
     if let Some(d) = dict {
         b = b.dictionary(d.clone());
     }
