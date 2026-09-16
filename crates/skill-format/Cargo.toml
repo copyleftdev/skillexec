@@ -1,0 +1,14 @@
+[package]
+name = "skill-format"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reference reader, validator and writer for the .skill binary container"
+
+[dependencies]
+blake3 = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
