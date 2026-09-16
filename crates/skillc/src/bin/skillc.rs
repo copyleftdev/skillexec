@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use skill_format::{Dictionary, Profile};
 use skill_format::{Skill, TrustPolicy};
-use skillc::{compile, compile_with, md, render};
+use skillc::{classify, compile, compile_with, md, render};
 
 #[derive(Default)]
 struct Corpus {
@@ -67,6 +67,12 @@ fn main() {
                 .map(|p| Dictionary::new(&std::fs::read(p).expect("read dictionary")));
             route_bench(list, profile, dict.as_ref());
         }
+        Some("roles") => {
+            role_census(args.get(1).map_or("-", String::as_str));
+        }
+        Some("cas") => {
+            cas_census(args.get(1).map_or("-", String::as_str));
+        }
         Some("dict") => {
             let list = args.get(1).map_or("-", String::as_str);
             let out = args.get(2).map_or("corpus.dict", String::as_str);
@@ -75,8 +81,141 @@ fn main() {
         }
         Some(path) => one(Path::new(path)),
         None => eprintln!(
-            "usage: skillc <SKILL.md>\n       skillc corpus <list> [limit] [--profile P] [--dict F]\n       skillc dict <list> <out.dict> [max-bytes]"
+            "usage: skillc <SKILL.md>\n       skillc corpus <list> [limit] [--profile P] [--dict F]\n       skillc route  <list> [--profile P] [--dict F]\n       skillc roles  <list>\n       skillc cas    <list>\n       skillc dict   <list> <out.dict> [max-bytes]"
         ),
+    }
+}
+
+/// Does the heading taxonomy generalise, or was it fitted to the corpus it was derived from?
+///
+/// The falsifiable claim in `GRAPH.md` §2 is that skills converge on a small set of section
+/// roles. If most headings on an unseen corpus fall through to plain prose, the taxonomy is a
+/// description of one machine's skills and not of skills.
+fn role_census(list: &str) {
+    let listing = std::fs::read_to_string(list).expect("read list");
+    let mut by_role: Vec<(u16, usize)> = Vec::new();
+    let mut unmatched: Vec<(String, usize)> = Vec::new();
+    let mut headings = 0usize;
+    let mut files = 0usize;
+
+    for line in listing.lines() {
+        let Ok(src) = std::fs::read_to_string(line) else {
+            continue;
+        };
+        files += 1;
+        for block in &md::parse(&src).blocks {
+            let md::Block::Heading { text, .. } = block else {
+                continue;
+            };
+            headings += 1;
+            let (_, _, role) = classify::heading(text);
+            match by_role.iter_mut().find(|(r, _)| *r == role) {
+                Some((_, n)) => *n += 1,
+                None => by_role.push((role, 1)),
+            }
+            if role == classify::ROLE_PROSE {
+                let key: String = text
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == ' ')
+                    .collect();
+                let key = key.trim().to_string();
+                match unmatched.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, n)) => *n += 1,
+                    None => unmatched.push((key, 1)),
+                }
+            }
+        }
+    }
+
+    by_role.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    unmatched.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let classified = headings
+        - by_role
+            .iter()
+            .find(|(r, _)| *r == classify::ROLE_PROSE)
+            .map_or(0, |(_, n)| *n);
+    println!("files            {files}");
+    println!("headings         {headings}");
+    println!(
+        "classified       {classified} ({:.1}%)",
+        classified as f64 * 100.0 / headings.max(1) as f64
+    );
+    println!("\nby role:");
+    for (r, n) in by_role.iter().take(20) {
+        println!(
+            "  {:>7}  {:<14} {:.1}%",
+            n,
+            classify::role_name(*r),
+            *n as f64 * 100.0 / headings.max(1) as f64
+        );
+    }
+    println!("\ntop unclassified headings:");
+    for (k, n) in unmatched.iter().take(30) {
+        println!("  {n:>6}  {k}");
+    }
+}
+
+/// How much would a corpus-wide content-addressed payload store save over per-file storage?
+///
+/// `SPEC.md` §6 claims identical sections across skills store once. Inside one file that is
+/// tested; across a corpus it has never been measured.
+fn cas_census(list: &str) {
+    let listing = std::fs::read_to_string(list).expect("read list");
+    let mut seen: std::collections::HashMap<[u8; 32], u32> = std::collections::HashMap::new();
+    let mut total = 0u64;
+    let mut unique = 0u64;
+    let mut payloads = 0u64;
+    let mut files = 0usize;
+
+    for line in listing.lines() {
+        let path = PathBuf::from(line);
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let doc = md::parse(&src);
+        let Ok((bytes, _)) = compile_with(&doc, &stem(&path), Profile::None, None) else {
+            continue;
+        };
+        let Ok(s) = Skill::open(&bytes, &TrustPolicy::permissive()) else {
+            continue;
+        };
+        files += 1;
+        for i in 0..u32::try_from(s.nodes.len()).unwrap_or(0) {
+            let Ok(p) = s.payload(i) else { continue };
+            if p.is_empty() {
+                continue;
+            }
+            payloads += 1;
+            total += p.len() as u64;
+            let h = *blake3::hash(p).as_bytes();
+            let e = seen.entry(h).or_insert(0);
+            if *e == 0 {
+                unique += p.len() as u64;
+            }
+            *e += 1;
+        }
+    }
+
+    let mut shared: Vec<(u32, [u8; 32])> = seen.iter().map(|(h, n)| (*n, *h)).collect();
+    shared.sort_unstable_by_key(|(n, _)| std::cmp::Reverse(*n));
+    let reused = shared.iter().filter(|(n, _)| *n > 1).count();
+    println!("files            {files}");
+    println!("payload nodes    {payloads}");
+    println!("distinct blobs   {}", seen.len());
+    println!(
+        "blobs reused     {reused} ({:.1}% of distinct)",
+        reused as f64 * 100.0 / seen.len().max(1) as f64
+    );
+    println!("payload bytes    {:.1} MB", total as f64 / 1.048_576e6);
+    println!("unique bytes     {:.1} MB", unique as f64 / 1.048_576e6);
+    println!(
+        "corpus-wide CAS  would store {:.1}% of the payload bytes",
+        unique as f64 * 100.0 / total.max(1) as f64
+    );
+    println!("\nmost-shared blobs:");
+    for (n, _) in shared.iter().take(8) {
+        println!("  x{n}");
     }
 }
 

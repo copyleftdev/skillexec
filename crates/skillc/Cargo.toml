@@ -8,6 +8,7 @@ description = "Compiles SKILL.md into the .skill binary container, and renders i
 
 [dependencies]
 skill-format = { path = "../skill-format" }
+blake3 = "1"
 
 [lints]
 workspace = true

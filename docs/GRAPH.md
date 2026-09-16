@@ -35,8 +35,22 @@ small, stable set of section roles.** In a 600-skill random sample:
 | tool discovery | 83 |
 | references / related skills | 105 |
 
-Nobody agreed on this vocabulary. It converged anyway, which is the evidence that a typed
-structure is already present and Markdown is merely a lossy flattening of it.
+Nobody agreed on this vocabulary and it recurs anyway, which is the evidence that a typed
+structure is already present and Markdown is a lossy flattening of it.
+
+### How strong that evidence actually is
+
+The counts above are matches, not a proportion, and an earlier draft of this section presented
+them as though they were the whole story. Measured against the denominator
+(`skillc roles`), across **130,528 headings in 8,776 skills**, the classifier recognises
+**40.3%**. The other 59.7% are a very long tail: no unclassified heading text accounts for more
+than 0.6% of the total.
+
+So the honest claim is weaker than "skills converge". A core vocabulary exists and covers about
+two fifths of all headings; the rest is genuinely idiosyncratic. The model survives that because
+**role never drives dispatch** (§2) — an unrecognised heading becomes plain `Prose` and every
+structural property still holds. A taxonomy that had to be exhaustive would have been the wrong
+design; this one only has to be useful.
 
 `SKILL.md` is not the skill. It is a **linearization** of the skill. `.skill` stores the graph.
 
