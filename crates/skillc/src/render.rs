@@ -9,16 +9,24 @@ use crate::classify::{ROLE_CONTINUATION, ROLE_FENCE, ROLE_FENCE_UNCLOSED, ROLE_F
 /// # Errors
 /// Propagates any failure to resolve a node's name or payload.
 pub fn render(s: &Skill<'_>) -> skill_format::Result<String> {
+    render_from(s, 0)
+}
+
+/// Renders one skill out of a bundle, treating `root` as that document's top.
+///
+/// # Errors
+/// Propagates any failure to resolve a node's name or payload.
+pub fn render_from(s: &Skill<'_>, root: u32) -> skill_format::Result<String> {
     let mut out = String::new();
-    emit(s, 0, &mut out)?;
+    emit_at(s, root, root, &mut out)?;
     Ok(out)
 }
 
-fn emit(s: &Skill<'_>, idx: u32, out: &mut String) -> skill_format::Result<()> {
+fn emit_at(s: &Skill<'_>, idx: u32, root: u32, out: &mut String) -> skill_format::Result<()> {
     let n = s.nodes[idx as usize];
     let payload = core::str::from_utf8(s.payload(idx)?).unwrap_or_default();
 
-    if idx != 0 {
+    if idx != root {
         if n.role == ROLE_FRONTMATTER {
             // The payload is the block as written, delimiters and all.
             out.push_str(payload);
@@ -56,7 +64,7 @@ fn emit(s: &Skill<'_>, idx: u32, out: &mut String) -> skill_format::Result<()> {
     out.push_str(payload);
 
     for &c in s.children_of(idx) {
-        emit(s, c, out)?;
+        emit_at(s, c, root, out)?;
     }
     Ok(())
 }

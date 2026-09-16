@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/skill-format", "crates/skillc", "crates/skill-run", "crates/corpusctl"]
+members = ["crates/skill-format", "crates/skillc", "crates/skill-run", "crates/corpusctl", "crates/skill-mcp"]
 resolver = "3"
 
 [workspace.package]

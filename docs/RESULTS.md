@@ -412,6 +412,27 @@ Choosing among the forty reads 13,954 bytes and decompresses nothing. The 61% is
 `Compact`: the personas share a house style, and content-addressed payloads collapse the overlap
 before zstd sees it.
 
+## Serving a library
+
+`crates/skill-mcp` exposes a library of containers over MCP with three tools, shaped so the
+transcript shows the tier split rather than hiding it:
+
+| Tool | What it touches |
+|---|---|
+| `skill_search` | routing planes only — no body, no decompression |
+| `skill_load` | the first read of a body, verified against its commitment before returning |
+| `skill_segments` | ABI, declared capabilities and limits for each executable fragment |
+
+The split is the point. A skills *directory* requires every description in the agent's context
+before it can choose; a library answers "which of these applies" from a contiguous block at a
+fixed offset and returns a body only once something has asked for it. At 249 bytes and ~180 ns
+per skill that scales to libraries no context window could hold.
+
+`skill_segments` is the tool with no Markdown equivalent. Across the corpus, 1.37 million
+executable fragments sit in fenced code blocks that nothing has ever checked. Compiled, each one
+reports its ABI, its declared capabilities and its trust class — and a `HostTrusted` fragment is
+labelled, never contained.
+
 ## Assembling a corpus
 
 The corpus tooling was shell first and is Rust now, because the shell version was the single
