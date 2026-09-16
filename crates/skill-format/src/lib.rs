@@ -66,6 +66,8 @@ pub struct Skill<'a> {
 
 impl<'a> Skill<'a> {
     /// `SPEC.md` §5 steps 1–6.
+    /// # Errors
+    /// Rejects at the first failing step of `SPEC.md` §5; [`Error::step`] reports which.
     pub fn open(bytes: &'a [u8], policy: &TrustPolicy) -> Result<Self> {
         let header = Header::parse(bytes)?;
         let signatures = sig::verify(bytes, header.sig_count, policy)?;
@@ -132,16 +134,23 @@ impl<'a> Skill<'a> {
         })
     }
 
+    /// # Errors
+    /// Rejects a manifest whose name index does not resolve.
     pub fn name(&self) -> Result<&'a str> {
         self.manifest.string(self.manifest.name_idx)
     }
 
+    /// # Errors
+    /// Rejects a manifest whose description index does not resolve.
     pub fn description(&self) -> Result<&'a str> {
         self.manifest.string(self.manifest.desc_idx)
     }
 
     /// Reading the routing plane never touches a body. This is the whole point of the tier
     /// split, and it is a property of the layout rather than of caller discipline.
+    /// # Errors
+    /// Rejects a malformed header or manifest. Performs no signature check: callers that
+    /// need one open the file properly.
     pub fn routing_view(bytes: &'a [u8]) -> Result<(&'a str, &'a str)> {
         let header = Header::parse(bytes)?;
         let raw = raw::bytes_at(
@@ -159,6 +168,8 @@ impl<'a> Skill<'a> {
     }
 
     /// Raw payload bytes. Unverified by design: callers that care use [`Skill::verified_payload`].
+    /// # Errors
+    /// Rejects an out-of-range node index or a payload range outside its region.
     pub fn payload(&self, idx: u32) -> Result<&'a [u8]> {
         let n = *self
             .nodes
@@ -180,6 +191,9 @@ impl<'a> Skill<'a> {
     }
 
     /// `SPEC.md` §5 step 7: lazy verification against the signed subtree commitment.
+    /// # Errors
+    /// Rejects a payload whose recomputed subtree hash differs from the signed
+    /// commitment (`SPEC.md` §5 step 7).
     pub fn verified_payload(&self, idx: u32) -> Result<&'a [u8]> {
         let want = self.manifest.hash(
             self.nodes
@@ -193,6 +207,8 @@ impl<'a> Skill<'a> {
         self.payload(idx)
     }
 
+    /// # Errors
+    /// Rejects an out-of-range node index or an unresolvable name or payload.
     pub fn compute_subtree(&self, idx: u32) -> Result<[u8; 32]> {
         let n = *self
             .nodes
@@ -222,6 +238,8 @@ impl<'a> Skill<'a> {
 
     /// Verifies every node's stored commitment. Linear; used by the conformance suite and by
     /// publishers, not on the hot path.
+    /// # Errors
+    /// Rejects the first node whose stored commitment does not match its subtree.
     pub fn verify_all(&self) -> Result<()> {
         for i in 0..u32::try_from(self.nodes.len()).unwrap_or(0) {
             let want = self.manifest.hash(self.nodes[i as usize].hash_idx)?;

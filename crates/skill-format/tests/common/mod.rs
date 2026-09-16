@@ -1,3 +1,6 @@
+// Shared by both test binaries; each uses a subset, so unused-here is expected.
+#![allow(dead_code)]
+
 use skill_format::{Builder, EdgeKind, Kind, Skill, Tier, TrustPolicy};
 
 pub const ROLE_INTENT: u16 = 1;
@@ -5,6 +8,7 @@ pub const ROLE_STEP: u16 = 2;
 pub const ROLE_PITFALL: u16 = 3;
 
 #[must_use]
+#[allow(clippy::missing_panics_doc)]
 pub fn minimal() -> Vec<u8> {
     let mut b = Builder::new("demo", "Use when demonstrating the skill format.");
     let root = b.root(Kind::Prose, Tier::Routing, ROLE_INTENT, &b""[..]);
@@ -22,6 +26,7 @@ pub fn minimal() -> Vec<u8> {
 
 /// Exercises every node kind, every edge kind and all three tiers.
 #[must_use]
+#[allow(clippy::missing_panics_doc)]
 pub fn rich() -> Vec<u8> {
     let mut b = Builder::new("rich", "Exercises every kind and tier.").version("1.2.3");
     let root = b.root(Kind::Prose, Tier::Routing, ROLE_INTENT, &b""[..]);
@@ -121,6 +126,7 @@ pub fn rich() -> Vec<u8> {
 /// Rebuilds a `Builder` from a parsed file. `serialize(parse(b)) == b` only holds if the
 /// reader recovered every canonical decision the writer made.
 #[must_use]
+#[allow(clippy::missing_panics_doc)]
 pub fn reserialize(bytes: &[u8]) -> Vec<u8> {
     let s = Skill::open(bytes, &TrustPolicy::permissive()).expect("reopen");
     let mut b = Builder::new(s.name().unwrap(), s.description().unwrap());
@@ -132,7 +138,7 @@ pub fn reserialize(bytes: &[u8]) -> Vec<u8> {
     }
     let mut ids = Vec::new();
     for (i, n) in s.nodes.iter().enumerate() {
-        let payload = s.payload(i as u32).unwrap().to_vec();
+        let payload = s.payload(u32::try_from(i).unwrap()).unwrap().to_vec();
         let id = if i == 0 {
             b.root(n.kind, n.tier, n.role, payload)
         } else {
@@ -168,6 +174,7 @@ pub fn reserialize(bytes: &[u8]) -> Vec<u8> {
 /// A publisher that signs a file it built incorrectly. Recomputing the commitments is what
 /// forces the hostile corpus past steps 1–5 and onto the validator, which is where graph
 /// invariants must hold on their own.
+#[allow(clippy::missing_panics_doc)]
 pub fn recommit(bytes: &mut [u8]) {
     let moff = u32::from_le_bytes(bytes[0x14..0x18].try_into().unwrap()) as usize;
     let mlen = u32::from_le_bytes(bytes[0x18..0x1C].try_into().unwrap()) as usize;
@@ -176,6 +183,7 @@ pub fn recommit(bytes: &mut [u8]) {
 }
 
 #[must_use]
+#[allow(clippy::missing_panics_doc)]
 pub fn section_off(bytes: &[u8], id: u16) -> usize {
     let moff = u32::from_le_bytes(bytes[0x14..0x18].try_into().unwrap()) as usize;
     let n = u16::from_le_bytes(bytes[moff..moff + 2].try_into().unwrap()) as usize;

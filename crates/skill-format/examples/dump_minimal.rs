@@ -28,7 +28,8 @@ fn main() {
     for (i, chunk) in bytes.chunks(16).enumerate() {
         let mut cols = String::new();
         for (j, byte) in chunk.iter().enumerate() {
-            cols.push_str(&format!("{byte:02x} "));
+            use std::fmt::Write as _;
+            let _ = write!(cols, "{byte:02x} ");
             if j == 7 {
                 cols.push(' ');
             }

@@ -25,6 +25,9 @@ pub struct Header {
 
 impl Header {
     /// `SPEC.md` §5 steps 1–2. Touches exactly the first 64 bytes.
+    /// # Errors
+    /// Rejects a file whose magic, major version, feature mask, reserved field or
+    /// declared length disagrees with its bytes (`SPEC.md` §5 steps 1–2).
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let head = bytes.get(..HEADER_LEN).ok_or(Error::Truncated {
             off: 0,

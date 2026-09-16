@@ -70,8 +70,6 @@ impl Builder {
         self.push(kind, tier, role, payload, None, None, 0)
     }
 
-    /// # Errors
-    /// Never; the returned id is always valid for this builder.
     #[allow(clippy::too_many_arguments)]
     pub fn child(
         &mut self,
@@ -118,6 +116,10 @@ impl Builder {
     /// # Errors
     /// Returns an error if the described tree is not a single-rooted, tier-monotone pre-order
     /// tree, or if any table would exceed the format's 4 GiB addressing.
+    ///
+    /// # Panics
+    /// Panics if a string reached here without having been interned, which would mean the
+    /// builder's own string collection and its emission disagree.
     #[allow(clippy::too_many_lines)]
     pub fn build(self) -> Result<Vec<u8>> {
         let order = self.pre_order()?;

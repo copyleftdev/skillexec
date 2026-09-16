@@ -70,7 +70,7 @@ fn truncation_at_every_section_boundary() {
 #[test]
 fn declared_length_must_match() {
     let mut b = minimal();
-    let wrong = (b.len() as u32) + 8;
+    let wrong = u32::try_from(b.len()).unwrap() + 8;
     b[0x10..0x14].copy_from_slice(&wrong.to_le_bytes());
     assert!(matches!(rejects(&b, 2), Error::LengthMismatch { .. }));
 }
@@ -227,7 +227,7 @@ fn string_heap_must_be_sorted_and_deduplicated() {
     let mut swapped = c.clone();
     swapped.extend_from_slice(&a);
     b[heap + o0 as usize..heap + o2 as usize].copy_from_slice(&swapped);
-    let new_mid = o0 + c.len() as u32;
+    let new_mid = o0 + u32::try_from(c.len()).unwrap();
     b[base + 8..base + 12].copy_from_slice(&new_mid.to_le_bytes());
     recommit(&mut b);
     let e = open(&b).expect_err("non-canonical heap must be rejected");

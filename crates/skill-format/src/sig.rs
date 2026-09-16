@@ -52,6 +52,9 @@ impl TrustPolicy {
 }
 
 /// `SPEC.md` §5 step 3. Runs before any variable-length parsing.
+/// # Errors
+/// Rejects a truncated signature block, a duplicated key id, a signature that fails
+/// verification, and — when the policy demands one — a file carrying no trusted signature.
 pub fn verify(bytes: &[u8], sig_count: u16, policy: &TrustPolicy) -> Result<Vec<SigEntry>> {
     let mut entries = Vec::with_capacity(sig_count as usize);
     let digest = crate::header::Header::signing_digest(bytes);

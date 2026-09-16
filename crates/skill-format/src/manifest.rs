@@ -120,11 +120,11 @@ impl<'a> Manifest<'a> {
             *slot = Some(sect);
         }
 
-        m.check_fixed(SECT_NODES, m.nodes, NODE_LEN)?;
-        m.check_fixed(SECT_EDGES, m.edges, EDGE_LEN)?;
-        m.check_fixed(SECT_HASHES, m.hashes, 32)?;
-        m.check_fixed(SECT_SEGMENTS, m.segments, SEGMENT_LEN)?;
-        m.check_fixed(SECT_CAPS, m.caps, CAP_LEN)?;
+        Self::check_fixed(SECT_NODES, m.nodes, NODE_LEN)?;
+        Self::check_fixed(SECT_EDGES, m.edges, EDGE_LEN)?;
+        Self::check_fixed(SECT_HASHES, m.hashes, 32)?;
+        Self::check_fixed(SECT_SEGMENTS, m.segments, SEGMENT_LEN)?;
+        Self::check_fixed(SECT_CAPS, m.caps, CAP_LEN)?;
 
         if m.node_count != m.nodes.map_or(0, |s| s.count) {
             return Err(Error::SectionCountMismatch { id: SECT_NODES });
@@ -132,7 +132,7 @@ impl<'a> Manifest<'a> {
         Ok(m)
     }
 
-    fn check_fixed(&self, id: u16, s: Option<SectionRef>, unit: usize) -> Result<()> {
+    fn check_fixed(id: u16, s: Option<SectionRef>, unit: usize) -> Result<()> {
         let Some(s) = s else { return Ok(()) };
         let unit_u32 = u32::try_from(unit).expect("record sizes are small");
         if !s.len.is_multiple_of(unit_u32) {
@@ -168,6 +168,8 @@ impl<'a> Manifest<'a> {
         self.segments.map_or(0, |s| s.count)
     }
 
+    /// # Errors
+    /// Rejects an out-of-range index, a reversed offset pair, or non-UTF-8 bytes.
     pub fn string(&self, idx: u32) -> Result<&'a str> {
         let s = self.strings.ok_or(Error::StringIndexOutOfRange(idx))?;
         if idx >= s.count {
@@ -186,6 +188,8 @@ impl<'a> Manifest<'a> {
         core::str::from_utf8(raw).map_err(|_| Error::StringIndexOutOfRange(idx))
     }
 
+    /// # Errors
+    /// Rejects an index past the end of the hash table.
     pub fn hash(&self, idx: u32) -> Result<[u8; 32]> {
         let s = self.hashes.ok_or(Error::HashIndexOutOfRange(idx))?;
         if idx >= s.count {
@@ -194,6 +198,8 @@ impl<'a> Manifest<'a> {
         hash_at(self.raw, s.off as usize + 32 * idx as usize)
     }
 
+    /// # Errors
+    /// Rejects an out-of-range index or a record naming an unknown kind or tier.
     pub fn node(&self, idx: u32) -> Result<Node> {
         let s = self.nodes.ok_or(Error::NodeIndexOutOfRange(idx))?;
         if idx >= s.count {
@@ -216,6 +222,9 @@ impl<'a> Manifest<'a> {
         })
     }
 
+    /// # Errors
+    /// Rejects an out-of-range index, an unknown edge kind, or the reserved `CONTAINS`
+    /// tag, which may never appear in the edge table (`SPEC.md` §10.1).
     pub fn edge(&self, idx: u32) -> Result<Edge> {
         let s = self.edges.ok_or(Error::NodeIndexOutOfRange(idx))?;
         if idx >= s.count {
@@ -235,6 +244,8 @@ impl<'a> Manifest<'a> {
         })
     }
 
+    /// # Errors
+    /// Rejects an out-of-range index, an unknown ABI, or a non-zero reserved field.
     pub fn segment(&self, idx: u32) -> Result<Segment> {
         let s = self.segments.ok_or(Error::SegmentIndexOutOfRange(idx))?;
         if idx >= s.count {
